@@ -27,7 +27,8 @@ from matplotlib.figure import Figure
 
 # Dynamic Metavision environment resolution
 # In virtual environments, system site-packages containing the Metavision installation may be isolated.
-# We auto-discover and append potential Metavision SDK installation paths on Windows and Linux.
+# We auto-discover and append potential Metavision SDK installation paths on Windows and Linux,
+# and link the native C++ DLL folders on Windows.
 def bootstrap_metavision_paths():
     import sys
     import platform
@@ -35,19 +36,30 @@ def bootstrap_metavision_paths():
 
     potential_paths = []
 
-    # 1. Discover based on OS
-    if platform.system() == "Windows":
-        # Windows system site-packages and standard C:\Program Files installations
-        app_data = os.environ.get("APPDATA", "")
-        local_app_data = os.environ.get("LOCALAPPDATA", "")
-        program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
+    # Resolve the base Python system site-packages if running inside a virtual environment
+    if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
+        # We are inside a virtualenv (venv)!
+        # Let's dynamically add the base/system interpreter's site-packages
+        base_prefix = getattr(sys, 'base_prefix', sys.prefix)
+        if platform.system() == "Windows":
+            potential_paths.append(os.path.join(base_prefix, "Lib", "site-packages"))
+        else:
+            # On Linux, find site-packages / dist-packages under the base python installation
+            py_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+            potential_paths.extend([
+                os.path.join(base_prefix, "lib", f"python{py_version}", "site-packages"),
+                os.path.join(base_prefix, "lib", f"python{py_version}", "dist-packages"),
+                os.path.join(base_prefix, "local", "lib", f"python{py_version}", "dist-packages"),
+            ])
 
-        # Base python system packages
+    # Discover based on Operating System
+    if platform.system() == "Windows":
+        # Add standard Windows installation paths for Prophesee SDK and OpenEB
         for path_str in [
             "C:\\Program Files\\Prophesee\\lib\\site-packages",
             "C:\\Program Files\\Prophesee\\python",
-            "C:\\tmp\\prophesee\\py3venv\\Lib\\site-packages",
             "C:\\Program Files\\OpenEB\\lib\\site-packages",
+            "C:\\tmp\\prophesee\\py3venv\\Lib\\site-packages",
         ]:
             potential_paths.append(path_str)
 
@@ -58,6 +70,21 @@ def bootstrap_metavision_paths():
             if programs_path.exists():
                 for py_dir in programs_path.iterdir():
                     potential_paths.append(str(py_dir / "Lib" / "site-packages"))
+
+        # CRITICAL: Windows Python 3.8+ requires explicitly loading directories containing external DLLs.
+        # We must load the C:\Program Files\Prophesee\bin directory to resolve dependencies of .pyd modules.
+        dll_dirs = [
+            "C:\\Program Files\\Prophesee\\bin",
+            "C:\\Program Files\\OpenEB\\bin",
+            "C:\\Program Files\\Prophesee\\lib\\metavision\\hal\\plugins",
+            "C:\\Program Files\\OpenEB\\lib\\metavision\\hal\\plugins"
+        ]
+        for dll_dir in dll_dirs:
+            if os.path.exists(dll_dir):
+                try:
+                    os.add_dll_directory(dll_dir)
+                except Exception as e:
+                    print(f"Failed adding DLL directory {dll_dir}: {e}")
     else:
         # Linux standard paths
         potential_paths.extend([
@@ -70,7 +97,7 @@ def bootstrap_metavision_paths():
             "/usr/lib/python3.12/dist-packages",
         ])
 
-    # 2. Append found paths that are not already in sys.path
+    # Append discovered paths to sys.path
     for path in potential_paths:
         if os.path.exists(path) and path not in sys.path:
             sys.path.append(path)
@@ -882,16 +909,15 @@ class EventRecorderApp(tk.Tk):
                 y_coords = y_coords[valid_mask]
                 polarities = polarities[valid_mask]
 
-                # Fast vectorised pixel assignments
+                # Fast vectorised pixel assignments (BGR format: Blue, Green, Red)
                 img[y_coords[polarities == 1], x_coords[polarities == 1]] = [0, 230, 0] # Green
-                img[y_coords[polarities == 0], x_coords[polarities == 0]] = [0, 0, 230] # Red
+                img[y_coords[polarities == 0], x_coords[polarities == 0]] = [0, 0, 230] # Red (Red is index 2 in BGR)
 
         # Resize image cleanly and update label
         img_resized = cv2.resize(img, (580, 410))
-        img_bgr = cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR)
 
-        # Convert OpenCV to PhotoImage
-        _, buffer = cv2.imencode('.png', img_bgr)
+        # Convert OpenCV to PhotoImage (img_resized is already BGR)
+        _, buffer = cv2.imencode('.png', img_resized)
         self.tk_image = tk.PhotoImage(data=buffer.tobytes())
         self.image_label.config(image=self.tk_image)
 
