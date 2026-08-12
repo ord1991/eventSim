@@ -102,8 +102,7 @@ bootstrap_metavision_paths()
 # Global flag to signal SDK availability
 METAVISION_AVAILABLE = False
 try:
-    from metavision_sdk_stream import Camera, CameraStreamSlicer
-    from metavision_sdk_core import BaseFrameGenerationAlgorithm
+    from metavision_core.event_io import EventsIterator
     from metavision_hal import DeviceDiscovery, DeviceConfig
     METAVISION_AVAILABLE = True
 except ImportError:
@@ -311,6 +310,7 @@ class EventRecorderApp(tk.Tk):
         self.camera_thread = None
         self.camera_width = 640
         self.camera_height = 480
+        self.persistent_frame = None  # To prevent flickering and add decay effect
 
         # GUI controlled camera configs
         self.accumulation_time_ms = tk.DoubleVar(value=20.0) # default 20ms accumulation
@@ -647,7 +647,7 @@ class EventRecorderApp(tk.Tk):
     def apply_custom_sdk_path(self):
         """Dynamically appends custom user specified path to sys.path and DLL directory search path on Windows."""
         global METAVISION_AVAILABLE
-        global Camera, CameraStreamSlicer, BaseFrameGenerationAlgorithm, DeviceDiscovery, DeviceConfig
+        global EventsIterator, DeviceDiscovery, DeviceConfig
 
         path = self.manual_sdk_path.get()
         if not path or not os.path.exists(path):
@@ -681,8 +681,7 @@ class EventRecorderApp(tk.Tk):
 
         # Attempt to import Metavision SDK dynamically
         try:
-            from metavision_sdk_stream import Camera, CameraStreamSlicer
-            from metavision_sdk_core import BaseFrameGenerationAlgorithm
+            from metavision_core.event_io import EventsIterator
             from metavision_hal import DeviceDiscovery, DeviceConfig
             METAVISION_AVAILABLE = True
 
@@ -728,15 +727,11 @@ class EventRecorderApp(tk.Tk):
             self.mock_camera = None
 
         if self.camera_instance:
-            try:
-                self.camera_instance.stop()
-            except:
-                pass
             self.camera_instance = None
             self.slicer_instance = None
 
         try:
-            # Discover and open physical USB device
+            # Discover physical USB device
             devs = DeviceDiscovery.list()
             if not devs:
                 messagebox.showwarning(
@@ -748,26 +743,28 @@ class EventRecorderApp(tk.Tk):
                 self.detect_camera_or_initialize()
                 return
 
-            config = DeviceConfig()
-            config.enable_biases_range_check_bypass(True)
-            self.camera_instance = Camera.from_first_available(config)
-            self.slicer_instance = CameraStreamSlicer(self.camera_instance.move())
-            self.camera_width = self.camera_instance.width()
-            self.camera_height = self.camera_instance.height()
+            # Instantiate camera using EventsIterator (Compatible with Metavision SDK 4.2+ & 5.0+)
+            # Setting delta_t=30000 microseconds (30ms) to poll at roughly 33 FPS
+            self.slicer_instance = EventsIterator(input_path="", delta_t=30000)
+
+            # Fetch HAL device for biases and registration
+            self.camera_instance = self.slicer_instance.reader.device
+            self.camera_height, self.camera_width = self.slicer_instance.get_size()
 
             self.running_live = True
             self.mode_status_label.config(text="מצלמת EVK4 מחוברת (Metavision SDK)", fg="#30d158")
 
-            # Fetch and apply initial bias values from physical device
-            device = self.camera_instance.get_i_ll_biases()
-            if device:
-                for name in EVK4_BIAS_DEFAULTS.keys():
-                    try:
-                        current_val = device.get(name)
-                        self.bias_vars[name].set(current_val)
-                        self.bias_val_labels[name].config(text=str(current_val))
-                    except:
-                        pass
+            # Fetch and apply initial bias values from physical device via HAL Biases facility
+            if self.camera_instance:
+                device_biases = self.camera_instance.get_i_ll_biases()
+                if device_biases:
+                    for name in EVK4_BIAS_DEFAULTS.keys():
+                        try:
+                            current_val = device_biases.get(name)
+                            self.bias_vars[name].set(current_val)
+                            self.bias_val_labels[name].config(text=str(current_val))
+                        except:
+                            pass
 
             # Start real camera frame polling worker
             self.camera_thread = threading.Thread(target=self.live_camera_worker, daemon=True)
@@ -781,32 +778,26 @@ class EventRecorderApp(tk.Tk):
             self.detect_camera_or_initialize()
 
     def live_camera_worker(self):
-        """Worker thread that starts the real camera and continuously gets event slices from the slicer."""
-        if not self.camera_instance or not self.slicer_instance:
+        """Worker thread that starts the real camera and continuously gets event blocks from the EventsIterator."""
+        if not self.slicer_instance:
             return
         try:
-            self.camera_instance.start()
-            for slice in self.slicer_instance:
+            for evs in self.slicer_instance:
                 if not self.running_live:
                     break
 
                 with self.lock:
-                    self.shared_events_buffer = slice.events
+                    self.shared_events_buffer = evs
                     if self.recording_active:
-                        self.total_live_recorded_events += len(slice.events)
+                        self.total_live_recorded_events += len(evs)
                         # Estimate recording file size
                         if self.live_recording_file_path and os.path.exists(self.live_recording_file_path):
                             self.recording_file_size_mb = os.path.getsize(self.live_recording_file_path) / (1024.0 * 1024.0)
                         else:
-                            self.recording_file_size_mb += (len(slice.events) * 8) / (1024.0 * 1024.0)
+                            self.recording_file_size_mb += (len(evs) * 8) / (1024.0 * 1024.0)
 
         except Exception as e:
             print(f"Exception in Metavision SDK thread: {e}")
-        finally:
-            try:
-                self.camera_instance.stop()
-            except:
-                pass
 
     def apply_erc_settings(self):
         rate = self.erc_rate.get()
@@ -865,7 +856,12 @@ class EventRecorderApp(tk.Tk):
                 if self.camera_instance and METAVISION_AVAILABLE:
                     self.total_live_recorded_events = 0
                     self.live_recording_file_path = raw_path
-                    self.camera_instance.start_recording(raw_path)
+                    # SDK 4.2+ uses HAL EventsStream facility directly for recording
+                    stream = self.camera_instance.get_i_events_stream()
+                    if stream:
+                        stream.log_raw_data(raw_path)
+                    else:
+                        raise Exception("התקן המצלמה לא תומך בהקלטה ישירה (facility missing)")
                 elif self.mock_camera:
                     self.mock_camera.start_recording(raw_path)
 
@@ -878,7 +874,9 @@ class EventRecorderApp(tk.Tk):
             # Stop Recording
             try:
                 if self.camera_instance and METAVISION_AVAILABLE:
-                    self.camera_instance.stop_recording()
+                    stream = self.camera_instance.get_i_events_stream()
+                    if stream:
+                        stream.stop_log_raw_data()
                 elif self.mock_camera:
                     self.mock_camera.stop_recording()
 
@@ -961,8 +959,12 @@ class EventRecorderApp(tk.Tk):
         elif self.mock_camera:
             events = self.mock_camera.generate_events(dt)
 
-        # Draw Visual Frame (Reconstructed Frame)
-        img = np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
+        # Draw Visual Frame (Reconstructed Frame) with phosphor decay persistence
+        if self.persistent_frame is None or self.persistent_frame.shape[:2] != (self.camera_height, self.camera_width):
+            self.persistent_frame = np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
+        else:
+            # Gradually decay older events to 30% of their brightness to prevent hard flickering
+            self.persistent_frame = (self.persistent_frame * 0.3).astype(np.uint8)
 
         # Accumulate events over the user-specified interval
         if len(events) > 0:
@@ -983,11 +985,11 @@ class EventRecorderApp(tk.Tk):
                 polarities = polarities[valid_mask]
 
                 # Fast vectorised pixel assignments (BGR format: Blue, Green, Red)
-                img[y_coords[polarities == 1], x_coords[polarities == 1]] = [0, 230, 0] # Green
-                img[y_coords[polarities == 0], x_coords[polarities == 0]] = [0, 0, 230] # Red (Red is index 2 in BGR)
+                self.persistent_frame[y_coords[polarities == 1], x_coords[polarities == 1]] = [0, 230, 0] # Green
+                self.persistent_frame[y_coords[polarities == 0], x_coords[polarities == 0]] = [0, 0, 230] # Red (Red is index 2 in BGR)
 
         # Resize image cleanly and update label
-        img_resized = cv2.resize(img, (580, 410))
+        img_resized = cv2.resize(self.persistent_frame, (580, 410))
 
         # Convert OpenCV to PhotoImage (img_resized is already BGR)
         _, buffer = cv2.imencode('.png', img_resized)
