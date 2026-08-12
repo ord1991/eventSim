@@ -25,6 +25,59 @@ matplotlib.use('TkAgg')
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+# Dynamic Metavision environment resolution
+# In virtual environments, system site-packages containing the Metavision installation may be isolated.
+# We auto-discover and append potential Metavision SDK installation paths on Windows and Linux.
+def bootstrap_metavision_paths():
+    import sys
+    import platform
+    from pathlib import Path
+
+    potential_paths = []
+
+    # 1. Discover based on OS
+    if platform.system() == "Windows":
+        # Windows system site-packages and standard C:\Program Files installations
+        app_data = os.environ.get("APPDATA", "")
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
+
+        # Base python system packages
+        for path_str in [
+            "C:\\Program Files\\Prophesee\\lib\\site-packages",
+            "C:\\Program Files\\Prophesee\\python",
+            "C:\\tmp\\prophesee\\py3venv\\Lib\\site-packages",
+            "C:\\Program Files\\OpenEB\\lib\\site-packages",
+        ]:
+            potential_paths.append(path_str)
+
+        # Dynamically find python version-specific folders under global Programs
+        user_profile = os.environ.get("USERPROFILE", "")
+        if user_profile:
+            programs_path = Path(user_profile) / "AppData" / "Local" / "Programs" / "Python"
+            if programs_path.exists():
+                for py_dir in programs_path.iterdir():
+                    potential_paths.append(str(py_dir / "Lib" / "site-packages"))
+    else:
+        # Linux standard paths
+        potential_paths.extend([
+            "/usr/lib/python3/dist-packages",
+            "/usr/local/lib/python3/dist-packages",
+            "/usr/share/metavision/python_requirements",
+            "/usr/lib/python3.9/dist-packages",
+            "/usr/lib/python3.10/dist-packages",
+            "/usr/lib/python3.11/dist-packages",
+            "/usr/lib/python3.12/dist-packages",
+        ])
+
+    # 2. Append found paths that are not already in sys.path
+    for path in potential_paths:
+        if os.path.exists(path) and path not in sys.path:
+            sys.path.append(path)
+
+# Bootstrap before importing Metavision
+bootstrap_metavision_paths()
+
 # Global flag to signal SDK availability
 METAVISION_AVAILABLE = False
 try:
@@ -33,6 +86,7 @@ try:
     from metavision_hal import DeviceDiscovery, DeviceConfig
     METAVISION_AVAILABLE = True
 except ImportError:
+    # Double check standard fallback path imports
     pass
 
 # Default EVK4 / IMX636 Biases (relative offsets around default value 0)
