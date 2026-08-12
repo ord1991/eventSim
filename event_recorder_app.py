@@ -34,13 +34,36 @@ def bootstrap_metavision_paths():
     from pathlib import Path
 
     potential_paths = []
+    dll_dirs = [
+        "C:\\Program Files\\Prophesee\\bin",
+        "C:\\Program Files\\OpenEB\\bin",
+        "C:\\Program Files\\Prophesee\\lib\\metavision\\hal\\plugins",
+        "C:\\Program Files\\OpenEB\\lib\\metavision\\hal\\plugins"
+    ]
 
     # Resolve the base Python system site-packages if running inside a virtual environment on Windows
     if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
         # We are inside a virtualenv (venv)!
-        # Let's dynamically add the base/system interpreter's site-packages
-        base_prefix = getattr(sys, 'base_prefix', sys.prefix)
-        potential_paths.append(os.path.join(base_prefix, "Lib", "site-packages"))
+        # Let's dynamically read pyvenv.cfg to find the main Python location and its site-packages
+        try:
+            base_prefix = getattr(sys, 'base_prefix', sys.prefix)
+            potential_paths.append(os.path.join(base_prefix, "Lib", "site-packages"))
+
+            # Read configuration if exists to resolve original system paths
+            venv_cfg = Path(sys.prefix) / "pyvenv.cfg"
+            if venv_cfg.exists():
+                with open(venv_cfg, "r") as f:
+                    for line in f:
+                        if line.strip().startswith("home"):
+                            home_path = line.split("=")[1].strip()
+                            # Home path points to C:\Users\...\Python310 (interpreter directory)
+                            py_home = Path(home_path)
+                            potential_paths.append(str(py_home / "Lib" / "site-packages"))
+                            # Also potential DLL binary directories if custom paths were configured
+                            dll_dirs.append(str(py_home / "Scripts"))
+                            dll_dirs.append(str(py_home))
+        except Exception as e:
+            print(f"Virtualenv bootstrap fallback resolution error: {e}")
 
     # Add standard Windows installation paths for Prophesee SDK and OpenEB
     for path_str in [
@@ -61,12 +84,6 @@ def bootstrap_metavision_paths():
 
     # CRITICAL: Windows Python 3.8+ requires explicitly loading directories containing external DLLs.
     # We must load the Prophesee/bin directory to resolve dependencies of .pyd modules.
-    dll_dirs = [
-        "C:\\Program Files\\Prophesee\\bin",
-        "C:\\Program Files\\OpenEB\\bin",
-        "C:\\Program Files\\Prophesee\\lib\\metavision\\hal\\plugins",
-        "C:\\Program Files\\OpenEB\\lib\\metavision\\hal\\plugins"
-    ]
     for dll_dir in dll_dirs:
         if os.path.exists(dll_dir):
             try:
