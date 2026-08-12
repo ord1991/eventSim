@@ -327,8 +327,8 @@ class EventRecorderApp(tk.Tk):
         self.build_graph_panel(col2)
 
         # Column 3: Biases Control, advanced filters & Recording (Right)
-        col3 = ttk.Frame(main_container, style="Panel.TFrame")
-        col3.pack(side="left", fill="both", expand=False, width=380, padx=5)
+        col3 = ttk.Frame(main_container, style="Panel.TFrame", width=380)
+        col3.pack(side="left", fill="both", expand=False, padx=5)
         self.build_control_panel(col3)
 
     def build_live_view_panel(self, parent):
