@@ -308,6 +308,9 @@ class EventRecorderApp(tk.Tk):
         header_label = tk.Label(header_frame, text="Prophesee EVK4 (IMX636) - מערכת שליטה והקלטה", bg="#2c2c2e", fg="#0a84ff", font=("Calibri", 16, "bold"))
         header_label.pack(side="right", padx=15, pady=10)
 
+        self.connect_btn = ttk.Button(header_frame, text="התחבר למצלמה פיזית (USB) 🔌", command=self.connect_to_physical_camera)
+        self.connect_btn.pack(side="left", padx=15, pady=10)
+
         self.mode_status_label = tk.Label(header_frame, text="מזהה חומרה...", bg="#2c2c2e", fg="#30d158", font=("Calibri", 12, "bold"))
         self.mode_status_label.pack(side="left", padx=15, pady=12)
 
@@ -544,41 +547,7 @@ class EventRecorderApp(tk.Tk):
 
     def detect_camera_or_initialize(self):
         """Tries opening real EVK4, falls back gracefully to Simulated camera."""
-        if METAVISION_AVAILABLE:
-            try:
-                # Attempt to discover first available camera
-                devs = DeviceDiscovery.list()
-                if devs:
-                    # EVK4 utilizes IMX636 which supports range checks bypass etc.
-                    config = DeviceConfig()
-                    config.enable_biases_range_check_bypass(True)
-                    self.camera_instance = Camera.from_first_available(config)
-                    self.slicer_instance = CameraStreamSlicer(self.camera_instance.move())
-                    self.camera_width = self.camera_instance.width()
-                    self.camera_height = self.camera_instance.height()
-
-                    self.running_live = True
-                    self.mode_status_label.config(text="מצלמת EVK4 מחוברת (Metavision SDK)", fg="#30d158")
-
-                    # Fetch initial bias values
-                    device = self.camera_instance.get_i_ll_biases()
-                    if device:
-                        for name in EVK4_BIAS_DEFAULTS.keys():
-                            try:
-                                current_val = device.get(name)
-                                self.bias_vars[name].set(current_val)
-                                self.bias_val_labels[name].config(text=str(current_val))
-                            except:
-                                pass
-
-                    # Start Metavision polling thread
-                    self.camera_thread = threading.Thread(target=self.live_camera_worker, daemon=True)
-                    self.camera_thread.start()
-                    return
-            except Exception as e:
-                print(f"Failed to initialize real hardware: {e}")
-
-        # Initialize custom moving simulation mode
+        # Initialize custom moving simulation mode by default
         self.mock_camera = SimulatedCamera()
         self.mock_camera.start()
         self.mode_status_label.config(text="מצב סימולטור (מצלמה מדומה - EVK4 Mock)", fg="#ff9500")
@@ -587,6 +556,75 @@ class EventRecorderApp(tk.Tk):
         for name, var in self.bias_vars.items():
             self.mock_camera.update_biases(name, var.get())
             self.bias_val_labels[name].config(text=str(var.get()))
+
+    def connect_to_physical_camera(self):
+        """Attempts to dynamically connect to a real physical USB event camera."""
+        if not METAVISION_AVAILABLE:
+            messagebox.showerror(
+                "שגיאה בחיבור",
+                "ספריית Metavision SDK אינה מותקנת בסביבת פייתון זו.\n"
+                "ודא שביצעת התקנה תקינה של ה-SDK והפורטים של פייתון זמינים."
+            )
+            return
+
+        # Disable active mock or existing camera safely
+        self.running_live = False
+        if self.mock_camera:
+            self.mock_camera.stop()
+            self.mock_camera = None
+
+        if self.camera_instance:
+            try:
+                self.camera_instance.stop()
+            except:
+                pass
+            self.camera_instance = None
+            self.slicer_instance = None
+
+        try:
+            # Discover and open physical USB device
+            devs = DeviceDiscovery.list()
+            if not devs:
+                messagebox.showwarning(
+                    "לא נמצאה מצלמה",
+                    "לא זוהתה מצלמת אירועים של Prophesee מחוברת ב-USB במערכת.\n"
+                    "ודא שהמצלמה מחוברת היטב, דולקת, ונסה שוב."
+                )
+                # Revert to simulator mode automatically
+                self.detect_camera_or_initialize()
+                return
+
+            config = DeviceConfig()
+            config.enable_biases_range_check_bypass(True)
+            self.camera_instance = Camera.from_first_available(config)
+            self.slicer_instance = CameraStreamSlicer(self.camera_instance.move())
+            self.camera_width = self.camera_instance.width()
+            self.camera_height = self.camera_instance.height()
+
+            self.running_live = True
+            self.mode_status_label.config(text="מצלמת EVK4 מחוברת (Metavision SDK)", fg="#30d158")
+
+            # Fetch and apply initial bias values from physical device
+            device = self.camera_instance.get_i_ll_biases()
+            if device:
+                for name in EVK4_BIAS_DEFAULTS.keys():
+                    try:
+                        current_val = device.get(name)
+                        self.bias_vars[name].set(current_val)
+                        self.bias_val_labels[name].config(text=str(current_val))
+                    except:
+                        pass
+
+            # Start real camera frame polling worker
+            self.camera_thread = threading.Thread(target=self.live_camera_worker, daemon=True)
+            self.camera_thread.start()
+
+            messagebox.showinfo("חיבור הצליח", "מצלמת Prophesee EVK4 חוברה בהצלחה! התצוגה והשליטה מנותבות לחומרה.")
+
+        except Exception as e:
+            messagebox.showerror("שגיאה בחיבור לחומרה", f"נכשלה פתיחת ההתקן הפיזי:\n{e}")
+            # Revert to simulator mode automatically
+            self.detect_camera_or_initialize()
 
     def live_camera_worker(self):
         """Worker thread that starts the real camera and continuously gets event slices from the slicer."""
