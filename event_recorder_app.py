@@ -25,77 +25,54 @@ matplotlib.use('TkAgg')
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-# Dynamic Metavision environment resolution
+# Dynamic Metavision environment resolution for Windows Platforms.
 # In virtual environments, system site-packages containing the Metavision installation may be isolated.
-# We auto-discover and append potential Metavision SDK installation paths on Windows and Linux,
-# and link the native C++ DLL folders on Windows.
+# We auto-discover and append potential Metavision SDK installation paths on Windows,
+# and link the native C++ DLL folders.
 def bootstrap_metavision_paths():
     import sys
-    import platform
     from pathlib import Path
 
     potential_paths = []
 
-    # Resolve the base Python system site-packages if running inside a virtual environment
+    # Resolve the base Python system site-packages if running inside a virtual environment on Windows
     if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
         # We are inside a virtualenv (venv)!
         # Let's dynamically add the base/system interpreter's site-packages
         base_prefix = getattr(sys, 'base_prefix', sys.prefix)
-        if platform.system() == "Windows":
-            potential_paths.append(os.path.join(base_prefix, "Lib", "site-packages"))
-        else:
-            # On Linux, find site-packages / dist-packages under the base python installation
-            py_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-            potential_paths.extend([
-                os.path.join(base_prefix, "lib", f"python{py_version}", "site-packages"),
-                os.path.join(base_prefix, "lib", f"python{py_version}", "dist-packages"),
-                os.path.join(base_prefix, "local", "lib", f"python{py_version}", "dist-packages"),
-            ])
+        potential_paths.append(os.path.join(base_prefix, "Lib", "site-packages"))
 
-    # Discover based on Operating System
-    if platform.system() == "Windows":
-        # Add standard Windows installation paths for Prophesee SDK and OpenEB
-        for path_str in [
-            "C:\\Program Files\\Prophesee\\lib\\site-packages",
-            "C:\\Program Files\\Prophesee\\python",
-            "C:\\Program Files\\OpenEB\\lib\\site-packages",
-            "C:\\tmp\\prophesee\\py3venv\\Lib\\site-packages",
-        ]:
-            potential_paths.append(path_str)
+    # Add standard Windows installation paths for Prophesee SDK and OpenEB
+    for path_str in [
+        "C:\\Program Files\\Prophesee\\lib\\site-packages",
+        "C:\\Program Files\\Prophesee\\python",
+        "C:\\Program Files\\OpenEB\\lib\\site-packages",
+        "C:\\tmp\\prophesee\\py3venv\\Lib\\site-packages",
+    ]:
+        potential_paths.append(path_str)
 
-        # Dynamically find python version-specific folders under global Programs
-        user_profile = os.environ.get("USERPROFILE", "")
-        if user_profile:
-            programs_path = Path(user_profile) / "AppData" / "Local" / "Programs" / "Python"
-            if programs_path.exists():
-                for py_dir in programs_path.iterdir():
-                    potential_paths.append(str(py_dir / "Lib" / "site-packages"))
+    # Dynamically find python version-specific folders under global Programs
+    user_profile = os.environ.get("USERPROFILE", "")
+    if user_profile:
+        programs_path = Path(user_profile) / "AppData" / "Local" / "Programs" / "Python"
+        if programs_path.exists():
+            for py_dir in programs_path.iterdir():
+                potential_paths.append(str(py_dir / "Lib" / "site-packages"))
 
-        # CRITICAL: Windows Python 3.8+ requires explicitly loading directories containing external DLLs.
-        # We must load the C:\Program Files\Prophesee\bin directory to resolve dependencies of .pyd modules.
-        dll_dirs = [
-            "C:\\Program Files\\Prophesee\\bin",
-            "C:\\Program Files\\OpenEB\\bin",
-            "C:\\Program Files\\Prophesee\\lib\\metavision\\hal\\plugins",
-            "C:\\Program Files\\OpenEB\\lib\\metavision\\hal\\plugins"
-        ]
-        for dll_dir in dll_dirs:
-            if os.path.exists(dll_dir):
-                try:
-                    os.add_dll_directory(dll_dir)
-                except Exception as e:
-                    print(f"Failed adding DLL directory {dll_dir}: {e}")
-    else:
-        # Linux standard paths
-        potential_paths.extend([
-            "/usr/lib/python3/dist-packages",
-            "/usr/local/lib/python3/dist-packages",
-            "/usr/share/metavision/python_requirements",
-            "/usr/lib/python3.9/dist-packages",
-            "/usr/lib/python3.10/dist-packages",
-            "/usr/lib/python3.11/dist-packages",
-            "/usr/lib/python3.12/dist-packages",
-        ])
+    # CRITICAL: Windows Python 3.8+ requires explicitly loading directories containing external DLLs.
+    # We must load the Prophesee/bin directory to resolve dependencies of .pyd modules.
+    dll_dirs = [
+        "C:\\Program Files\\Prophesee\\bin",
+        "C:\\Program Files\\OpenEB\\bin",
+        "C:\\Program Files\\Prophesee\\lib\\metavision\\hal\\plugins",
+        "C:\\Program Files\\OpenEB\\lib\\metavision\\hal\\plugins"
+    ]
+    for dll_dir in dll_dirs:
+        if os.path.exists(dll_dir):
+            try:
+                os.add_dll_directory(dll_dir)
+            except Exception as e:
+                print(f"Failed adding DLL directory {dll_dir}: {e}")
 
     # Append discovered paths to sys.path
     for path in potential_paths:
@@ -572,6 +549,24 @@ class EventRecorderApp(tk.Tk):
         save_btn = ttk.Button(conf_btn_f, text="שמור הגדרות", command=self.save_camera_settings_json)
         save_btn.pack(side="left", fill="x", expand=True, padx=2)
 
+        # 3b. Manual Metavision SDK/DLL Directory Specification
+        sdk_section = ttk.LabelFrame(scroll_frame, text="ניתוב ידני ל-Metavision SDK / DLL", style="Panel.TFrame")
+        sdk_section.pack(fill="x", padx=10, pady=5)
+
+        self.manual_sdk_path = tk.StringVar(value="C:\\Program Files\\Prophesee")
+
+        sdk_path_f = ttk.Frame(sdk_section, style="Panel.TFrame")
+        sdk_path_f.pack(fill="x", padx=5, pady=4)
+        ttk.Label(sdk_path_f, text="תיקיית התקנה:", style="PanelSec.TLabel").pack(side="right")
+        sdk_browse_btn = ttk.Button(sdk_path_f, text="בחר...", width=8, command=self.browse_manual_sdk_path)
+        sdk_browse_btn.pack(side="left")
+
+        self.sdk_path_entry = ttk.Entry(sdk_section, textvariable=self.manual_sdk_path)
+        self.sdk_path_entry.pack(fill="x", padx=5, pady=2)
+
+        self.apply_sdk_btn = ttk.Button(sdk_section, text="טען והפעל SDK ידנית ⚙️", style="Action.TButton", command=self.apply_custom_sdk_path)
+        self.apply_sdk_btn.pack(fill="x", padx=5, pady=5)
+
         # 4. Recording & Storage Panel
         rec_section = ttk.LabelFrame(scroll_frame, text="הקלטת וידאו / אירועים (RAW)", style="Panel.TFrame")
         rec_section.pack(fill="x", padx=10, pady=5)
@@ -625,6 +620,67 @@ class EventRecorderApp(tk.Tk):
                 print(f"Error setting bias {name}: {e}")
         elif self.mock_camera:
             self.mock_camera.update_biases(name, val_int)
+
+    def browse_manual_sdk_path(self):
+        """Opens a folder selection dialog for specified manual SDK/DLL installation."""
+        folder = filedialog.askdirectory(title="בחר תיקיית התקנה של Metavision SDK")
+        if folder:
+            self.manual_sdk_path.set(folder)
+
+    def apply_custom_sdk_path(self):
+        """Dynamically appends custom user specified path to sys.path and DLL directory search path on Windows."""
+        global METAVISION_AVAILABLE
+        global Camera, CameraStreamSlicer, BaseFrameGenerationAlgorithm, DeviceDiscovery, DeviceConfig
+
+        path = self.manual_sdk_path.get()
+        if not path or not os.path.exists(path):
+            messagebox.showerror("שגיאה", "הנתיב שנבחר אינו קיים במחשב.")
+            return
+
+        # Build possible subpaths based on standard installation layout
+        # C:\Program Files\Prophesee contains \bin for DLLs and \lib\site-packages or \python for bindings
+        site_packages = os.path.join(path, "lib", "site-packages")
+        python_pkg = os.path.join(path, "python")
+        bin_dir = os.path.join(path, "bin")
+        hal_plugins = os.path.join(path, "lib", "metavision", "hal", "plugins")
+
+        import sys
+        # Register site-packages/python folder to PYTHONPATH
+        added_sys = False
+        for folder in [site_packages, python_pkg, path]:
+            if os.path.exists(folder) and folder not in sys.path:
+                sys.path.append(folder)
+                added_sys = True
+
+        # Register DLL / bin directory
+        added_dll = False
+        for folder in [bin_dir, hal_plugins]:
+            if os.path.exists(folder):
+                try:
+                    os.add_dll_directory(folder)
+                    added_dll = True
+                except Exception as e:
+                    print(f"Failed loading DLL folder {folder}: {e}")
+
+        # Attempt to import Metavision SDK dynamically
+        try:
+            from metavision_sdk_stream import Camera, CameraStreamSlicer
+            from metavision_sdk_core import BaseFrameGenerationAlgorithm
+            from metavision_hal import DeviceDiscovery, DeviceConfig
+            METAVISION_AVAILABLE = True
+
+            messagebox.showinfo(
+                "הצלחה",
+                "ה-SDK של Metavision ויחידות ה-DLL נטענו בהצלחה במערכת!\n"
+                "כעת תוכל ללחוץ על 'התחבר למצלמה פיזית (USB)' כדי להפעיל את המצלמה."
+            )
+        except ImportError as e:
+            messagebox.showerror(
+                "שגיאה בטעינה",
+                f"נמצאה התיקייה אך ייבוא ה-SDK של Metavision נכשל.\n"
+                "ודא שתיקייה זו היא אכן תיקיית ההתקנה הראשית של Prophesee.\n"
+                f"פרטי שגיאה:\n{e}"
+            )
 
     def detect_camera_or_initialize(self):
         """Tries opening real EVK4, falls back gracefully to Simulated camera."""
