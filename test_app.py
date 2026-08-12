@@ -95,5 +95,36 @@ class TestAppMockConnection(unittest.TestCase):
         mock_cam.stop()
         self.assertFalse(mock_cam.is_running)
 
+class TestRawFileDecoder(unittest.TestCase):
+    def test_evt2_decoding(self):
+        # Create a mock EVT2.0 binary raw data
+        import struct
+        from event_recorder_app import RawFileDecoder
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "test.raw")
+            with open(file_path, "wb") as f:
+                # Header
+                f.write(b"% This is a mock header\n")
+                # EVT_TIME_HIGH (type 8, value = 1) -> 0x80000001
+                f.write(struct.pack("<I", 0x80000001))
+                # CD_ON (type 1, ts_lsb = 10, x = 100, y = 200)
+                # Word construction:
+                # type (4 bits) = 1 -> 0x10000000
+                # ts_lsb (6 bits) = 10 -> (10 << 22) = 0x02800000
+                # x (11 bits) = 100 -> (100 << 11) = 0x00032000
+                # y (11 bits) = 200 -> 0x000000C8
+                # Combined = 0x128320C8
+                f.write(struct.pack("<I", 0x128320C8))
+
+            decoder = RawFileDecoder(file_path)
+            events = decoder.read_events()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]['x'], 100)
+            self.assertEqual(events[0]['y'], 200)
+            self.assertEqual(events[0]['p'], 1)
+            self.assertEqual(events[0]['t'], (1 << 6) | 10)
+            decoder.close()
+
 if __name__ == "__main__":
     unittest.main()

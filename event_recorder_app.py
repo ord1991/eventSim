@@ -121,6 +121,89 @@ EVK4_BIAS_DEFAULTS = {
 }
 
 
+class RawFileDecoder:
+    """
+    High-performance pure Python parser for Prophesee EVT2.0 raw event stream files.
+    Decodes events without any native DLL or SDK dependency.
+    """
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.file = open(file_path, "rb")
+        self.current_time_high = 0
+
+        # Skip header lines if present (Prophesee RAW files start with % characters)
+        self.skip_header()
+
+    def skip_header(self):
+        # Read the first byte
+        while True:
+            pos = self.file.tell()
+            char = self.file.read(1)
+            if not char:
+                break
+            if char == b'%':
+                # Skip line
+                self.file.readline()
+            else:
+                # Seek back and stop
+                self.file.seek(pos)
+                break
+
+    def read_events(self, duration_sec=0.030):
+        """
+        Reads raw 32-bit words and decodes them into structured EVT2.0 format.
+        """
+        # Read a chunk of 32-bit words (each word is 4 bytes)
+        # 16384 words = 65536 bytes
+        chunk_size_words = 16384
+        data = self.file.read(chunk_size_words * 4)
+        if not data:
+            self.file.seek(0)
+            self.skip_header()
+            data = self.file.read(chunk_size_words * 4)
+            if not data:
+                return np.array([], dtype=[('x', '<u2'), ('y', '<u2'), ('p', 'i2'), ('t', '<i8')])
+
+        words = np.frombuffer(data, dtype=np.uint32)
+
+        # Parse EVT2.0 format
+        # 4 MSBs (bits 28..31) determine type:
+        # '0000' (0) = CD_OFF
+        # '0001' (1) = CD_ON
+        # '1000' (8) = EVT_TIME_HIGH
+        types = words >> 28
+
+        events_list = []
+        for i in range(len(words)):
+            w = words[i]
+            t = types[i]
+
+            if t == 8:
+                # EVT_TIME_HIGH: contains 28 MSB bits of the timestamp (bits 27..0 of word)
+                self.current_time_high = (w & 0x0FFFFFFF) << 6
+            elif t == 0 or t == 1:
+                # CD_OFF or CD_ON
+                # LSB 6 bits of timestamp are bits 27..22
+                ts_lsb = (w >> 22) & 0x3F
+                timestamp = self.current_time_high | ts_lsb
+
+                # X coordinate: bits 21..11 (11 bits)
+                x = (w >> 11) & 0x7FF
+                # Y coordinate: bits 10..0 (11 bits)
+                y = w & 0x7FF
+
+                polarity = 1 if t == 1 else 0
+                events_list.append((x, y, polarity, timestamp))
+
+        # Sort and construct structured numpy array
+        events = np.array(events_list, dtype=[('x', '<u2'), ('y', '<u2'), ('p', 'i2'), ('t', '<i8')])
+        return events
+
+    def close(self):
+        if self.file:
+            self.file.close()
+
+
 class SimulatedCamera:
     """
     Simulates an event camera producing moving geometric shapes (e.g. circle, square)
@@ -311,6 +394,7 @@ class EventRecorderApp(tk.Tk):
         self.camera_width = 640
         self.camera_height = 480
         self.persistent_frame = None  # To prevent flickering and add decay effect
+        self.raw_file_player = None  # Non-DLL based RAW file player
 
         # GUI controlled camera configs
         self.accumulation_time_ms = tk.DoubleVar(value=20.0) # default 20ms accumulation
@@ -384,7 +468,10 @@ class EventRecorderApp(tk.Tk):
         header_label.pack(side="right", padx=15, pady=10)
 
         self.connect_btn = ttk.Button(header_frame, text="התחבר למצלמה פיזית (USB) 🔌", command=self.connect_to_physical_camera)
-        self.connect_btn.pack(side="left", padx=15, pady=10)
+        self.connect_btn.pack(side="left", padx=5, pady=10)
+
+        self.play_raw_btn = ttk.Button(header_frame, text="נגן קובץ RAW (ללא DLL) 📂", command=self.open_and_play_raw_file)
+        self.play_raw_btn.pack(side="left", padx=5, pady=10)
 
         self.mode_status_label = tk.Label(header_frame, text="מזהה חומרה...", bg="#2c2c2e", fg="#30d158", font=("Calibri", 12, "bold"))
         self.mode_status_label.pack(side="left", padx=15, pady=12)
@@ -710,6 +797,36 @@ class EventRecorderApp(tk.Tk):
             self.mock_camera.update_biases(name, var.get())
             self.bias_val_labels[name].config(text=str(var.get()))
 
+    def open_and_play_raw_file(self):
+        """Opens and plays a Prophesee .raw file using pure Python parser, completely bypassing SDK/DLLs."""
+        filename = filedialog.askopenfilename(
+            title="בחר קובץ אירועים RAW",
+            filetypes=[("Prophesee RAW file", "*.raw"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+
+        # Safely shut down all other sources (mocks, threads, active cameras)
+        self.running_live = False
+        if self.mock_camera:
+            self.mock_camera.stop()
+            self.mock_camera = None
+
+        if self.raw_file_player:
+            self.raw_file_player.close()
+            self.raw_file_player = None
+
+        try:
+            self.raw_file_player = RawFileDecoder(filename)
+            self.camera_width = 1280  # Default HD width, auto-resized by visualizer
+            self.camera_height = 720
+
+            self.mode_status_label.config(text=f"מנגן קובץ RAW (ללא DLL): {Path(filename).name}", fg="#30d158")
+            messagebox.showinfo("קובץ נטען", f"הקובץ {Path(filename).name} נטען בהצלחה ומנוגן כעת ללא צורך ב-DLL של היצרן!")
+        except Exception as e:
+            messagebox.showerror("שגיאה בטעינת קובץ", f"נכשלה פתיחת קובץ האירועים:\n{e}")
+            self.detect_camera_or_initialize()
+
     def connect_to_physical_camera(self):
         """Attempts to dynamically connect to a real physical USB event camera."""
         if not METAVISION_AVAILABLE:
@@ -956,6 +1073,11 @@ class EventRecorderApp(tk.Tk):
                 if self.shared_events_buffer is not None:
                     events = self.shared_events_buffer
                     self.shared_events_buffer = None # Consume/Read
+        elif self.raw_file_player:
+            try:
+                events = self.raw_file_player.read_events(dt)
+            except Exception as e:
+                print(f"Error reading RAW file player: {e}")
         elif self.mock_camera:
             events = self.mock_camera.generate_events(dt)
 
@@ -1047,6 +1169,8 @@ class EventRecorderApp(tk.Tk):
         self.running_live = False
         if self.mock_camera:
             self.mock_camera.stop()
+        if self.raw_file_player:
+            self.raw_file_player.close()
         if self.camera_instance and METAVISION_AVAILABLE:
             try:
                 self.camera_instance.stop()
