@@ -84,5 +84,16 @@ class TestSimulatedCamera(unittest.TestCase):
             self.assertTrue(0 <= ev['y'] < 480)
             self.assertTrue(ev['p'] in (0, 1))
 
+class TestAppMockConnection(unittest.TestCase):
+    def test_mock_fallback_logic(self):
+        # Verify app is safely fallback ready by inspecting components without rendering
+        from event_recorder_app import SimulatedCamera, EVK4_BIAS_DEFAULTS
+        mock_cam = SimulatedCamera()
+        self.assertFalse(mock_cam.is_running)
+        mock_cam.start()
+        self.assertTrue(mock_cam.is_running)
+        mock_cam.stop()
+        self.assertFalse(mock_cam.is_running)
+
 if __name__ == "__main__":
     unittest.main()
