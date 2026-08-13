@@ -23,23 +23,55 @@ except ImportError:
     pass
 
 
+# Import Matplotlib for Event Rate plotting
+import matplotlib
+matplotlib.use('TkAgg')
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+
+# Default EVK4 / IMX636 Biases (relative offsets around default value 0)
+EVK4_BIAS_DEFAULTS = {
+    "bias_diff": {"value": 0, "min": -25, "max": 23, "desc": "Photoreceptor output reference level"},
+    "bias_diff_on": {"value": 0, "min": -85, "max": 140, "desc": "Contrast sensitivity threshold for ON events"},
+    "bias_diff_off": {"value": 0, "min": -35, "max": 190, "desc": "Contrast sensitivity threshold for OFF events"},
+    "bias_fo": {"value": 0, "min": -35, "max": 55, "desc": "Low-pass filter cutoff frequency (photoreceptor)"},
+    "bias_hpf": {"value": 0, "min": 0, "max": 120, "desc": "High-pass filter cutoff frequency (diff amp)"},
+    "bias_refr": {"value": 0, "min": -20, "max": 235, "desc": "Refractory period (dead time) delay"}
+}
+
+
 class EventRecorderApp(tk.Tk):
     """
     Tkinter interface with modern dark styling.
-    Focuses purely on connecting to the physical USB camera and displaying its live video.
+    Provides complete camera control and dynamic event-rate rolling timeline.
     """
     def __init__(self):
         super().__init__()
-        self.title("Prophesee EVK4 Viewer (Hebrew GUI)")
-        self.geometry("1024x700")
-        self.minsize(800, 600)
+        self.title("Prophesee EVK4 Control & Viewer (Hebrew GUI)")
+        self.geometry("1280x768")
+        self.minsize(1024, 700)
 
         # Thread safety lock
         self.lock = threading.Lock()
         self.shared_display_frame = None
         self.running_live = False
         self.slicer_instance = None
+        self.camera_instance = None
         self.camera_thread = None
+
+        # Plotting & Stats History
+        self.time_history = []
+        self.rate_history = []
+        self.start_app_time = time.time()
+        self.event_rate_live = 0.0
+
+        # GUI Controlled parameters
+        self.accumulation_time_ms = tk.DoubleVar(value=30.0) # default 30ms accumulation
+        self.accumulation_ms_val = 30.0  # Thread-safe float copy of accumulation_time_ms
+        self.erc_enabled = tk.BooleanVar(value=False)
+        self.erc_rate = tk.IntVar(value=1000000) # events/sec
+        self.trail_filter_enabled = tk.BooleanVar(value=False)
+        self.trail_filter_threshold_us = tk.IntVar(value=10000)
 
         # Enable Dark Theme Style
         self.style = ttk.Style()
@@ -103,22 +135,202 @@ class EventRecorderApp(tk.Tk):
         self.image_label = tk.Label(col1, bg="#000000")
         self.image_label.pack(fill="both", expand=True, padx=15, pady=15)
 
-        # Column 2: Connection settings (Right, small panel)
-        col2 = ttk.Frame(main_container, style="Panel.TFrame", width=340)
-        col2.pack(side="left", fill="both", expand=False, padx=5)
+        # Column 2: Event Rate plot + Accumulation Slider (Middle)
+        col2 = ttk.Frame(main_container, style="Panel.TFrame")
+        col2.pack(side="left", fill="both", expand=True, padx=5)
+        self.build_graph_panel(col2)
 
-        side_title = ttk.Label(col2, text="הגדרות וחיבור", style="PanelTitle.TLabel")
-        side_title.pack(anchor="ne", padx=15, pady=10)
+        # Column 3: Connection settings + Parameter Controls (Right)
+        col3 = ttk.Frame(main_container, style="Panel.TFrame", width=380)
+        col3.pack(side="left", fill="both", expand=False, padx=5)
+        self.build_control_panel(col3)
 
-        # Connection status label
-        self.status_box_lbl = ttk.Label(col2, text="מזהה SDK...", style="PanelSec.TLabel", font=("Calibri", 12, "bold"))
-        self.status_box_lbl.pack(anchor="ne", padx=15, pady=10)
+    def build_graph_panel(self, parent):
+        """Middle panel containing real-time Matplotlib chart and accumulation slider below it."""
+        title_lbl = ttk.Label(parent, text="קצב אירועים על ציר הזמן", style="PanelTitle.TLabel")
+        title_lbl.pack(anchor="ne", padx=15, pady=10)
+
+        # Setup Matplotlib Figure
+        self.fig = Figure(figsize=(4, 4), dpi=100, facecolor="#2c2c2e")
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_facecolor("#1c1c1e")
+        self.fig.subplots_adjust(bottom=0.15, left=0.15)
+        self.ax.spines['bottom'].set_color('#aeaeae')
+        self.ax.spines['top'].set_color('#aeaeae')
+        self.ax.spines['right'].set_color('#aeaeae')
+        self.ax.spines['left'].set_color('#aeaeae')
+        self.ax.tick_params(axis='x', colors='#aeaeae')
+        self.ax.tick_params(axis='y', colors='#aeaeae')
+        self.ax.set_xlabel("זמן ריצה (שניות)", color='#aeaeae', fontname="Calibri", fontsize=10)
+        self.ax.set_ylabel("קצב אירועים (kEvt/sec)", color='#aeaeae', fontname="Calibri", fontsize=10)
+
+        self.line, = self.ax.plot([], [], color="#0a84ff", linewidth=2)
+
+        # Embed chart into Tkinter widget
+        self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=15, pady=10)
+
+        # Accumulation Time Slider Area directly underneath the chart
+        acc_control_frame = ttk.Frame(parent, style="Panel.TFrame")
+        acc_control_frame.pack(fill="x", side="bottom", padx=15, pady=15)
+
+        slider_label = ttk.Label(acc_control_frame, text="זמן אקומולציה (מילישניות):", style="PanelSec.TLabel")
+        slider_label.pack(side="right", padx=5)
+
+        self.acc_slider_val_lbl = ttk.Label(acc_control_frame, text="30.0 ms", style="PanelSec.TLabel", font=("Calibri", 12, "bold"), foreground="#30d158")
+        self.acc_slider_val_lbl.pack(side="left", padx=5)
+
+        acc_slider = ttk.Scale(
+            acc_control_frame,
+            from_=1.0,
+            to=100.0,
+            variable=self.accumulation_time_ms,
+            orient="horizontal",
+            command=self.on_accumulation_slider_moved
+        )
+        acc_slider.pack(fill="x", expand=True, side="right", padx=10)
+
+    def on_accumulation_slider_moved(self, val):
+        val_float = float(val)
+        self.acc_slider_val_lbl.config(text=f"{val_float:.1f} ms")
+        self.accumulation_ms_val = val_float
+
+    def build_control_panel(self, parent):
+        """Right sidebar containing Biases parameters, ERC, and Trail Filter controls."""
+        # Scrollable container for control params
+        canvas = tk.Canvas(parent, bg="#2c2c2e", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        scroll_frame = ttk.Frame(canvas, style="Panel.TFrame")
+
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw", width=360)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # SDK / Connection Status Box
+        status_sec = ttk.LabelFrame(scroll_frame, text="חיבור וסטטוס", style="Panel.TFrame")
+        status_sec.pack(fill="x", padx=10, pady=5)
+
+        self.status_box_lbl = ttk.Label(status_sec, text="מזהה SDK...", style="PanelSec.TLabel", font=("Calibri", 12, "bold"))
+        self.status_box_lbl.pack(anchor="ne", padx=10, pady=10)
+
+        # 1. Parameter Tuning Section (Biases)
+        bias_section = ttk.LabelFrame(scroll_frame, text="פרמטרי חומרה (Biases - EVK4)", style="Panel.TFrame")
+        bias_section.pack(fill="x", padx=10, pady=5)
+
+        self.bias_vars = {}
+        self.bias_val_labels = {}
+
+        for name, info in EVK4_BIAS_DEFAULTS.items():
+            b_frame = ttk.Frame(bias_section, style="Panel.TFrame")
+            b_frame.pack(fill="x", padx=5, pady=4)
+
+            lbl = ttk.Label(b_frame, text=f"{name}:", style="PanelSec.TLabel")
+            lbl.pack(side="right")
+
+            val_lbl = ttk.Label(b_frame, text="0", style="PanelSec.TLabel", font=("Calibri", 12, "bold"), foreground="#30d158")
+            val_lbl.pack(side="left")
+            self.bias_val_labels[name] = val_lbl
+
+            var = tk.IntVar(value=info["value"])
+            self.bias_vars[name] = var
+
+            slider = ttk.Scale(
+                b_frame,
+                from_=info["min"],
+                to=info["max"],
+                variable=var,
+                orient="horizontal",
+                command=lambda val, n=name: self.on_bias_slider_moved(n, val)
+            )
+            slider.pack(fill="x", expand=True, side="bottom", padx=5, pady=2)
+
+            desc_lbl = ttk.Label(b_frame, text=info["desc"], style="PanelSec.TLabel", font=("Calibri", 9), foreground="#aeaeae")
+            desc_lbl.pack(side="bottom", anchor="e", padx=5)
+
+        # 2. Advanced Filters (ERC & Trail Filter)
+        advanced_section = ttk.LabelFrame(scroll_frame, text="מסננים ובקרת קצב (ERC / Trail Filter)", style="Panel.TFrame")
+        advanced_section.pack(fill="x", padx=10, pady=5)
+
+        # ERC Enable
+        erc_f = ttk.Frame(advanced_section, style="Panel.TFrame")
+        erc_f.pack(fill="x", padx=5, pady=4)
+        erc_chk = ttk.Checkbutton(erc_f, text="הפעל בקרת קצב אירועים (ERC)", variable=self.erc_enabled, command=self.apply_erc_settings)
+        erc_chk.pack(side="right")
+
+        # ERC Rate
+        erc_rate_f = ttk.Frame(advanced_section, style="Panel.TFrame")
+        erc_rate_f.pack(fill="x", padx=5, pady=4)
+        ttk.Label(erc_rate_f, text="מגבלת קצב (Evt/sec):", style="PanelSec.TLabel").pack(side="right")
+        erc_rate_entry = ttk.Entry(erc_rate_f, textvariable=self.erc_rate, width=12)
+        erc_rate_entry.pack(side="left")
+        erc_rate_entry.bind("<Return>", lambda e: self.apply_erc_settings())
+
+        # Trail Filter Enable
+        trail_f = ttk.Frame(advanced_section, style="Panel.TFrame")
+        trail_f.pack(fill="x", padx=5, pady=4)
+        trail_chk = ttk.Checkbutton(trail_f, text="הפעל מסנן רעש (Event Trail Filter)", variable=self.trail_filter_enabled, command=self.apply_trail_settings)
+        trail_chk.pack(side="right")
+
+        # Trail Filter Threshold
+        trail_thresh_f = ttk.Frame(advanced_section, style="Panel.TFrame")
+        trail_thresh_f.pack(fill="x", padx=5, pady=4)
+        ttk.Label(trail_thresh_f, text="סף השהייה (מיקרושניות):", style="PanelSec.TLabel").pack(side="right")
+        trail_thresh_entry = ttk.Entry(trail_thresh_f, textvariable=self.trail_filter_threshold_us, width=12)
+        trail_thresh_entry.pack(side="left")
+        trail_thresh_entry.bind("<Return>", lambda e: self.apply_trail_settings())
 
     def update_sdk_status(self):
         if METAVISION_AVAILABLE:
             self.status_box_lbl.config(text="סטטוס: ה-SDK זוהה בהצלחה! מוכן לחיבור.", foreground="#30d158")
         else:
             self.status_box_lbl.config(text="סטטוס: ה-SDK לא מותקן / לא זוהה.", foreground="#ff453a")
+
+    def on_bias_slider_moved(self, name, val):
+        val_int = int(float(val))
+        self.bias_val_labels[name].config(text=str(val_int))
+
+        # Set active hardware biases directly if camera is connected
+        if self.running_live and self.camera_instance:
+            try:
+                biases = self.camera_instance.get_i_ll_biases()
+                if biases:
+                    biases.set(name, val_int)
+            except Exception as e:
+                print(f"Error setting bias {name} on hardware: {e}")
+
+    def apply_erc_settings(self):
+        enabled = self.erc_enabled.get()
+        rate = self.erc_rate.get()
+
+        if self.running_live and self.camera_instance:
+            try:
+                erc = self.camera_instance.get_i_erc_module()
+                if erc:
+                    erc.enable(enabled)
+                    if enabled:
+                        erc.set_cd_event_rate(rate)
+            except Exception as e:
+                print(f"Error applying ERC: {e}")
+
+    def apply_trail_settings(self):
+        enabled = self.trail_filter_enabled.get()
+        threshold = self.trail_filter_threshold_us.get()
+
+        if self.running_live and self.camera_instance:
+            try:
+                trail = self.camera_instance.get_i_event_trail_filter_module()
+                if trail:
+                    trail.enable(enabled)
+                    if enabled:
+                        trail.set_threshold(threshold)
+            except Exception as e:
+                print(f"Error applying Event Trail Filter: {e}")
 
     def connect_to_physical_camera(self):
         """Attempts to dynamically connect to a real physical USB event camera."""
@@ -138,8 +350,8 @@ class EventRecorderApp(tk.Tk):
         try:
             # Instantiate camera using EventsIterator on 1ms slice time base
             self.slicer_instance = EventsIterator(input_path="", delta_t=1000)
-            device = self.slicer_instance.reader.device
-            if not device:
+            self.camera_instance = self.slicer_instance.reader.device
+            if not self.camera_instance:
                 messagebox.showwarning(
                     "לא נמצאה מצלמה",
                     "לא זוהתה מצלמת אירועים של Prophesee מחוברת ב-USB במערכת.\n"
@@ -149,6 +361,17 @@ class EventRecorderApp(tk.Tk):
                 return
 
             sensor_height, sensor_width = self.slicer_instance.get_size()
+
+            # Read and populate sliders with original EVK4 biases
+            biases = self.camera_instance.get_i_ll_biases()
+            if biases:
+                for name in EVK4_BIAS_DEFAULTS.keys():
+                    try:
+                        current_val = biases.get(name)
+                        self.bias_vars[name].set(current_val)
+                        self.bias_val_labels[name].config(text=str(current_val))
+                    except:
+                        pass
 
             self.running_live = True
             self.status_box_lbl.config(text="סטטוס: מצלמה פיזית מחוברת ומזרימה וידאו חי! 🎥", foreground="#30d158")
@@ -173,8 +396,9 @@ class EventRecorderApp(tk.Tk):
 
         # Draw frame using user's white and gray accumulation logic
         display_frame = np.zeros((height, width, 3), dtype=np.uint8)
-        frames_to_accumulate = 30 # Accumulate 30 cycles of 1ms before presenting
         frame_counter = 0
+        accumulated_events_count = 0
+        last_calc_time = time.time()
 
         try:
             for evs in self.slicer_instance:
@@ -184,16 +408,32 @@ class EventRecorderApp(tk.Tk):
                 # 1. Accumulate events
                 if evs.size > 0:
                     display_frame[evs['y'], evs['x']] = np.where(evs['p'][:, None] == 1, [255, 255, 255], [100, 100, 100])
+                    accumulated_events_count += evs.size
 
                 frame_counter += 1
+
+                # Read dynamically from thread-safe variable (converted to integer ms)
+                frames_to_accumulate = max(1, int(self.accumulation_ms_val))
+
                 if frame_counter >= frames_to_accumulate:
-                    # Thread-safe dispatch frame to UI loop
+                    now = time.time()
+                    dt = now - last_calc_time
+                    if dt <= 0:
+                        dt = 0.001
+
+                    # Calculate event rate (events/sec) for this accumulated interval
+                    evt_rate = accumulated_events_count / dt
+
+                    # Thread-safe dispatch frame and stats to UI loop
                     with self.lock:
                         self.shared_display_frame = display_frame.copy()
+                        self.event_rate_live = evt_rate
 
                     # Clear canvas for the next block to prevent smearing
                     display_frame = np.zeros((height, width, 3), dtype=np.uint8)
                     frame_counter = 0
+                    accumulated_events_count = 0
+                    last_calc_time = now
 
         except Exception as e:
             print(f"Exception in Metavision SDK thread: {e}")
@@ -201,10 +441,13 @@ class EventRecorderApp(tk.Tk):
     def update_loop(self):
         """Continuously pulls reconstructed frames from shared buffer and draws them on Tkinter canvas."""
         frame = None
+        current_rate = 0.0
+
         with self.lock:
             if self.shared_display_frame is not None:
                 frame = self.shared_display_frame
                 self.shared_display_frame = None
+            current_rate = self.event_rate_live
 
         if frame is not None:
             # Resize image cleanly and update label
@@ -214,6 +457,25 @@ class EventRecorderApp(tk.Tk):
             _, buffer = cv2.imencode('.png', img_resized)
             self.tk_image = tk.PhotoImage(data=buffer.tobytes())
             self.image_label.config(image=self.tk_image)
+
+            # Update chart history using the accumulated rate
+            elapsed = time.time() - self.start_app_time
+            self.time_history.append(elapsed)
+            self.rate_history.append(current_rate / 1000.0) # Convert to kEvt/sec
+
+            if len(self.time_history) > 60:
+                self.time_history.pop(0)
+                self.rate_history.pop(0)
+
+            # Plot redraw
+            self.ax.clear()
+            self.ax.set_facecolor("#1c1c1e")
+            self.ax.plot(self.time_history, self.rate_history, color="#0a84ff", linewidth=2)
+            self.ax.tick_params(axis='x', colors='#aeaeae')
+            self.ax.tick_params(axis='y', colors='#aeaeae')
+            self.ax.set_xlabel("זמן ריצה (שניות)", color='#aeaeae', fontname="Calibri", fontsize=10)
+            self.ax.set_ylabel("קצב אירועים (kEvt/sec)", color='#aeaeae', fontname="Calibri", fontsize=10)
+            self.canvas.draw()
 
         # Re-trigger loop every 20ms
         self.after(20, self.update_loop)
