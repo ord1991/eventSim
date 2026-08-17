@@ -64,6 +64,7 @@ class EventRecorderApp(tk.Tk):
         self.rate_history = []
         self.start_app_time = time.time()
         self.event_rate_live = 0.0
+        self.last_graph_update_time = 0.0  # Decoupled graph plotting rate limiter
 
         # GUI Controlled parameters
         self.accumulation_time_ms = tk.DoubleVar(value=30.0) # default 30ms accumulation
@@ -111,9 +112,14 @@ class EventRecorderApp(tk.Tk):
 
     def create_layout(self):
         """Builds a side-by-side dashboard interface."""
+        # Prevent main Tk window resize propagation
+        self.pack_propagate(False)
+        self.grid_propagate(False)
+
         # Top Header Bar
         header_frame = tk.Frame(self, bg="#2c2c2e", height=50)
         header_frame.pack(side="top", fill="x", padx=0, pady=0)
+        header_frame.pack_propagate(False)
 
         header_label = tk.Label(header_frame, text="Prophesee Event Camera Connection & Tuning System", bg="#2c2c2e", fg="#0a84ff", font=("Calibri", 15, "bold"))
         header_label.pack(side="left", padx=15, pady=10)
@@ -126,8 +132,9 @@ class EventRecorderApp(tk.Tk):
         main_container.pack(side="top", fill="both", expand=True, padx=10, pady=10)
 
         # Column 1: Live Video frame (Left, takes most space)
-        col1 = ttk.Frame(main_container, style="Panel.TFrame")
+        col1 = ttk.Frame(main_container, style="Panel.TFrame", width=500, height=600)
         col1.pack(side="left", fill="both", expand=True, padx=5)
+        col1.pack_propagate(False)
 
         title_lbl = ttk.Label(col1, text="Real-Time Live Event View", style="PanelTitle.TLabel")
         title_lbl.pack(anchor="nw", padx=15, pady=10)
@@ -136,13 +143,15 @@ class EventRecorderApp(tk.Tk):
         self.image_label.pack(fill="both", expand=True, padx=15, pady=15)
 
         # Column 2: Event Rate plot + Accumulation Slider (Middle)
-        col2 = ttk.Frame(main_container, style="Panel.TFrame")
+        col2 = ttk.Frame(main_container, style="Panel.TFrame", width=380, height=600)
         col2.pack(side="left", fill="both", expand=True, padx=5)
+        col2.pack_propagate(False)
         self.build_graph_panel(col2)
 
         # Column 3: Connection settings + Parameter Controls (Right)
-        col3 = ttk.Frame(main_container, style="Panel.TFrame", width=380)
+        col3 = ttk.Frame(main_container, style="Panel.TFrame", width=380, height=600)
         col3.pack(side="left", fill="both", expand=False, padx=5)
+        col3.pack_propagate(False)
         self.build_control_panel(col3)
 
     def build_graph_panel(self, parent):
@@ -449,6 +458,7 @@ class EventRecorderApp(tk.Tk):
                 self.shared_display_frame = None
             current_rate = self.event_rate_live
 
+        # Handle live video frame update (very fast, occurs on every loop)
         if frame is not None:
             # Resize image cleanly and update label
             img_resized = cv2.resize(frame, (620, 440))
@@ -458,35 +468,37 @@ class EventRecorderApp(tk.Tk):
             self.tk_image = tk.PhotoImage(data=buffer.tobytes())
             self.image_label.config(image=self.tk_image)
 
-            # Update chart history using the accumulated rate
+            # Append current rate to historical arrays
             elapsed = time.time() - self.start_app_time
             self.time_history.append(elapsed)
             self.rate_history.append(current_rate / 1000.0) # Convert to kEvt/sec
 
             # Bound the rolling timeline history to exactly 10 seconds of data.
-            # At ~30-50 updates/sec, we keep at most ~300 entries.
-            # Calculate actual elements spanning last 10 seconds.
             while self.time_history and (elapsed - self.time_history[0] > 10.0):
                 self.time_history.pop(0)
                 self.rate_history.pop(0)
 
-            # High-performance rolling plot redraw: Directly modify line data instead of clearing axes.
-            # This completely avoids memory leaks, CPU spikes and stutters!
-            if self.time_history:
-                self.line.set_data(self.time_history, self.rate_history)
+            # Plot timeline updates at a decoupled rate (maximum once per 500ms)
+            # This completely resolves CPU exhaustion and progressive GUI freezing/lag!
+            now = time.time()
+            if now - self.last_graph_update_time >= 0.5:
+                self.last_graph_update_time = now
 
-                # Auto-adjust plot limits with small padding
-                self.ax.set_xlim(self.time_history[0], self.time_history[-1] + 0.1)
+                if self.time_history:
+                    self.line.set_data(self.time_history, self.rate_history)
 
-                min_rate = min(self.rate_history)
-                max_rate = max(self.rate_history)
-                # Ensure minimum 1.0 vertical span
-                if max_rate - min_rate < 1.0:
-                    self.ax.set_ylim(max(0.0, min_rate - 0.5), min_rate + 1.0)
-                else:
-                    self.ax.set_ylim(max(0.0, min_rate - 0.2 * (max_rate - min_rate)), max_rate + 0.2 * (max_rate - min_rate))
+                    # Auto-adjust plot limits with small padding
+                    self.ax.set_xlim(self.time_history[0], self.time_history[-1] + 0.1)
 
-                self.canvas.draw_idle()
+                    min_rate = min(self.rate_history)
+                    max_rate = max(self.rate_history)
+                    # Ensure minimum 1.0 vertical span
+                    if max_rate - min_rate < 1.0:
+                        self.ax.set_ylim(max(0.0, min_rate - 0.5), min_rate + 1.0)
+                    else:
+                        self.ax.set_ylim(max(0.0, min_rate - 0.2 * (max_rate - min_rate)), max_rate + 0.2 * (max_rate - min_rate))
+
+                    self.canvas.draw_idle()
 
         # Re-trigger loop every 20ms
         self.after(20, self.update_loop)
