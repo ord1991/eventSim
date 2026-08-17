@@ -74,6 +74,14 @@ class EventRecorderApp(tk.Tk):
         self.trail_filter_enabled = tk.BooleanVar(value=False)
         self.trail_filter_threshold_us = tk.IntVar(value=10000)
 
+        # Recording variables
+        self.recording_active = False
+        self.recording_dir = tk.StringVar(value=str(Path.home()))
+        self.recording_filename = tk.StringVar(value="event_recording.raw")
+        self.record_start_time = 0.0
+        self.total_recorded_events = 0
+        self.recorded_bytes = 0
+
         # Enable Dark Theme Style
         self.style = ttk.Style()
         self.style.theme_use('clam')
@@ -109,6 +117,8 @@ class EventRecorderApp(tk.Tk):
         self.style.map("TButton", background=[("active", "#48484a"), ("pressed", "#2c2c2e")])
         self.style.configure("Action.TButton", background=accent_blue, foreground=text_white)
         self.style.map("Action.TButton", background=[("active", "#359aff"), ("pressed", "#0066cc")])
+        self.style.configure("RecordOn.TButton", background="#ff453a", foreground=text_white)
+        self.style.map("RecordOn.TButton", background=[("active", "#ff6961"), ("pressed", "#b30000")])
 
     def create_layout(self):
         """Builds a side-by-side dashboard interface."""
@@ -124,8 +134,14 @@ class EventRecorderApp(tk.Tk):
         header_label = tk.Label(header_frame, text="Prophesee Event Camera Connection & Tuning System", bg="#2c2c2e", fg="#0a84ff", font=("Calibri", 15, "bold"))
         header_label.pack(side="left", padx=15, pady=10)
 
-        self.connect_btn = ttk.Button(header_frame, text="Connect to Physical Camera (USB) 🔌", style="Action.TButton", command=self.connect_to_physical_camera)
-        self.connect_btn.pack(side="right", padx=15, pady=10)
+        btn_box = tk.Frame(header_frame, bg="#2c2c2e")
+        btn_box.pack(side="right", padx=15, pady=5)
+
+        self.connect_btn = ttk.Button(btn_box, text="Connect Camera 🔌", style="Action.TButton", command=self.connect_to_physical_camera)
+        self.connect_btn.pack(side="left", padx=5)
+
+        self.disconnect_btn = ttk.Button(btn_box, text="Disconnect Camera ❌", style="TButton", command=self.disconnect_camera)
+        self.disconnect_btn.pack(side="left", padx=5)
 
         # Main Work Area
         main_container = ttk.Frame(self)
@@ -294,6 +310,51 @@ class EventRecorderApp(tk.Tk):
         trail_thresh_entry.pack(side="right")
         trail_thresh_entry.bind("<Return>", lambda e: self.apply_trail_settings())
 
+        # 3. Recording & Storage Section
+        rec_section = ttk.LabelFrame(scroll_frame, text="RAW Recording & Storage", style="Panel.TFrame")
+        rec_section.pack(fill="x", padx=10, pady=5)
+
+        # Output Directory Selection
+        dir_f = ttk.Frame(rec_section, style="Panel.TFrame")
+        dir_f.pack(fill="x", padx=5, pady=4)
+        ttk.Label(dir_f, text="Output Directory:", style="PanelSec.TLabel").pack(side="left")
+        dir_browse_btn = ttk.Button(dir_f, text="Browse...", width=8, command=self.choose_recording_directory)
+        dir_browse_btn.pack(side="right")
+
+        dir_entry = ttk.Entry(rec_section, textvariable=self.recording_dir)
+        dir_entry.pack(fill="x", padx=5, pady=2)
+
+        # Output Filename
+        file_f = ttk.Frame(rec_section, style="Panel.TFrame")
+        file_f.pack(fill="x", padx=5, pady=4)
+        ttk.Label(file_f, text="Filename (.raw):", style="PanelSec.TLabel").pack(side="left")
+        file_entry = ttk.Entry(file_f, textvariable=self.recording_filename, width=18)
+        file_entry.pack(side="right")
+
+        # Start/Stop Recording Button
+        self.record_btn = ttk.Button(rec_section, text="Start Recording 🔴", style="TButton", command=self.toggle_recording)
+        self.record_btn.pack(fill="x", padx=5, pady=8)
+
+        # Recording Stats
+        stats_frame = ttk.Frame(rec_section, style="Panel.TFrame")
+        stats_frame.pack(fill="x", padx=5, pady=5)
+
+        self.stat_duration = self.create_stat_widget(stats_frame, "Duration:", "0.0 s", 0, 0)
+        self.stat_file_size = self.create_stat_widget(stats_frame, "File Size:", "0.0 MB", 0, 1)
+        self.stat_tot_events = self.create_stat_widget(stats_frame, "Recorded Events:", "0", 1, 0)
+        self.stat_rate = self.create_stat_widget(stats_frame, "Current Rate:", "0 Evt/s", 1, 1)
+
+    def create_stat_widget(self, parent, label, val_text, row, col):
+        f = ttk.Frame(parent, style="Panel.TFrame")
+        f.grid(row=row, column=col, sticky="nsew", padx=5, pady=3)
+
+        lbl = ttk.Label(f, text=label, style="PanelSec.TLabel", font=("Calibri", 9), foreground="#aeaeae")
+        lbl.pack(anchor="w")
+
+        val = ttk.Label(f, text=val_text, style="PanelSec.TLabel", font=("Calibri", 11, "bold"), foreground="#30d158")
+        val.pack(anchor="w")
+        return val
+
     def update_sdk_status(self):
         if METAVISION_AVAILABLE:
             self.status_box_lbl.config(text="Status: SDK detected successfully! Ready to connect.", foreground="#30d158")
@@ -341,6 +402,77 @@ class EventRecorderApp(tk.Tk):
             except Exception as e:
                 print(f"Error applying Event Trail Filter: {e}")
 
+    def disconnect_camera(self):
+        """Safely stops and disconnects from the physical camera device."""
+        if self.recording_active:
+            self.toggle_recording()
+
+        self.running_live = False
+        self.slicer_instance = None
+        self.camera_instance = None
+
+        # Reset live image label to black
+        img_black = np.zeros((440, 620, 3), dtype=np.uint8)
+        _, buffer = cv2.imencode('.png', img_black)
+        self.tk_image = tk.PhotoImage(data=buffer.tobytes())
+        self.image_label.config(image=self.tk_image)
+
+        self.update_sdk_status()
+        messagebox.showinfo("Disconnected", "Physical camera has been safely disconnected.")
+
+    def choose_recording_directory(self):
+        """Opens a folder selection dialog for recording output path."""
+        folder = filedialog.askdirectory(title="Select Recording Output Directory")
+        if folder:
+            self.recording_dir.set(folder)
+
+    def toggle_recording(self):
+        """Starts or stops RAW event stream recording."""
+        if not self.recording_active:
+            if not self.running_live or not self.camera_instance:
+                messagebox.showerror("Recording Error", "Please connect to a physical camera before starting a recording.")
+                return
+
+            out_dir = self.recording_dir.get()
+            out_name = self.recording_filename.get()
+            if not out_dir or not out_name:
+                messagebox.showerror("Recording Error", "Please specify a valid directory and filename.")
+                return
+
+            full_path = os.path.join(out_dir, out_name)
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+            try:
+                # Access HAL EventsStream facility
+                stream = self.camera_instance.get_i_events_stream()
+                if not stream:
+                    messagebox.showerror("Recording Error", "Camera device does not support I_EventsStream recording facility.")
+                    return
+
+                stream.log_raw_data(full_path)
+                self.recording_active = True
+                self.record_start_time = time.time()
+                self.total_recorded_events = 0
+                self.recorded_bytes = 0
+
+                self.record_btn.config(text="Stop Recording ⏹", style="RecordOn.TButton")
+            except Exception as e:
+                messagebox.showerror("Recording Error", f"Failed to start RAW recording:\n{e}")
+        else:
+            # Stop active recording
+            try:
+                if self.camera_instance:
+                    stream = self.camera_instance.get_i_events_stream()
+                    if stream:
+                        stream.stop_log_raw_data()
+
+                self.recording_active = False
+                self.record_btn.config(text="Start Recording 🔴", style="TButton")
+                full_path = os.path.join(self.recording_dir.get(), self.recording_filename.get())
+                messagebox.showinfo("Recording Saved", f"Recording saved successfully to:\n{full_path}")
+            except Exception as e:
+                messagebox.showerror("Recording Error", f"Failed to stop RAW recording:\n{e}")
+
     def connect_to_physical_camera(self):
         """Attempts to dynamically connect to a real physical USB event camera."""
         if not METAVISION_AVAILABLE:
@@ -352,9 +484,7 @@ class EventRecorderApp(tk.Tk):
             return
 
         # Disable active existing connections safely
-        self.running_live = False
-        if self.slicer_instance:
-            self.slicer_instance = None
+        self.disconnect_camera()
 
         try:
             # Instantiate camera using EventsIterator on 1ms slice time base
@@ -442,6 +572,8 @@ class EventRecorderApp(tk.Tk):
                     with self.lock:
                         self.shared_display_frame = display_frame.copy()
                         self.event_rate_live = evt_rate
+                        if self.recording_active:
+                            self.total_recorded_events += accumulated_events_count
 
                     # Clear canvas for the next block to prevent smearing
                     display_frame = np.zeros((height, width, 3), dtype=np.uint8)
@@ -507,6 +639,25 @@ class EventRecorderApp(tk.Tk):
                         self.ax.set_ylim(max(0.0, min_rate - 0.2 * (max_rate - min_rate)), max_rate + 0.2 * (max_rate - min_rate))
 
                     self.canvas.draw_idle()
+
+        # Update recording statistics
+        if self.recording_active:
+            dur = time.time() - self.record_start_time
+            full_path = os.path.join(self.recording_dir.get(), self.recording_filename.get())
+            if os.path.exists(full_path):
+                file_mb = os.path.getsize(full_path) / (1024.0 * 1024.0)
+            else:
+                file_mb = (self.total_recorded_events * 8.0) / (1024.0 * 1024.0)
+
+            self.stat_duration.config(text=f"{dur:.1f} s")
+            self.stat_file_size.config(text=f"{file_mb:.2f} MB")
+            self.stat_tot_events.config(text=f"{self.total_recorded_events:,}")
+            self.stat_rate.config(text=f"{int(current_rate):,} Evt/s")
+        else:
+            self.stat_duration.config(text="0.0 s")
+            self.stat_file_size.config(text="0.0 MB")
+            self.stat_tot_events.config(text="0")
+            self.stat_rate.config(text="0 Evt/s")
 
         # Re-trigger loop every 20ms
         self.after(20, self.update_loop)
