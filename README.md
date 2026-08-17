@@ -1,58 +1,81 @@
-# Prophesee EVK4 Event Camera Controller & Live Viewer
+# ⚡ Prophesee EVK4 Event Camera Controller & Live Viewer ⚡
 
-A high-performance, responsive graphical user interface (GUI) designed for **Prophesee EVK4 (IMX636)** event-based cameras. The application is written in Python and leverages the standard **Metavision SDK** (fully compatible with version 4.2+ up to the latest releases).
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Metavision SDK](https://img.shields.io/badge/Metavision%20SDK-4.2%2B-orange.svg)](https://www.prophesee.ai/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-4.x-green.svg)](https://opencv.org/)
+[![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
-The interface is completely translated to English and designed with a modern, dark-themed styling. It runs event polling and frame accumulation on an asynchronous background thread to guarantee a highly responsive, fluid user experience without any GUI freezes or stutters.
+A high-performance, responsive graphical user interface (GUI) designed for **Prophesee EVK4 (IMX636)** neuromorphic event-based vision sensors. The application is written in Python and leverages the standard **Metavision SDK** (fully compatible with version 4.2+ up to the latest releases).
 
----
-
-## Key Features
-
-### 1. Real-Time Live Event View
-- Visualizes the raw event stream dynamically as a standard 2D video (accumulating ON events as white pixels and OFF events as gray pixels).
-- Uses efficient OpenCV canvas mapping and conversion to display native events with microsecond precision.
-
-### 2. High-Performance Event Rate Timeline Plot
-- Embeds a real-time `Matplotlib` plot inside the dashboard showing the camera's current event-rate (`kEvt/sec`).
-- **Memory & Lag Optimization**: To prevent memory leaks, high CPU usage, or gradual freezing (lag) commonly associated with continuous plotting, the chart:
-  1. Limits rolling timeline history to exactly the last **10 seconds** of execution.
-  2. Employs direct line data updates (`line.set_data()`) and idle redraws (`canvas.draw_idle()`) instead of expensive axis clearing (`ax.clear()`), making graph rendering practically free for the CPU.
-- **Dynamic Accumulation Slider**: Placed directly underneath the chart, this slider lets you modify the accumulation time-window in milliseconds (from 1ms to 100ms) on the fly, immediately updating both the live video rendering and the rate integration basis.
-
-### 3. Full Hardware Bias & Parameter Tuning Sidebar
-- Adjusts sensor behaviors directly on the physical hardware via the Metavision SDK HAL facility bindings:
-  - `bias_diff`: Photoreceptor output reference level.
-  - `bias_diff_on`: Contrast sensitivity threshold for ON events.
-  - `bias_diff_off`: Contrast sensitivity threshold for OFF events.
-  - `bias_fo`: Low-pass filter cutoff frequency.
-  - `bias_hpf`: High-pass filter cutoff frequency.
-  - `bias_refr`: Refractory period (pixel dead-time) delay.
-- **Event Rate Controller (ERC)**: Checkbox and text entry to dynamically enable and configure maximum events-per-second constraints to throttle bandwidth.
-- **Event Trail Filter**: Checkbox and text entry to enable digital event trail noise filtering and configure its microsecond delay threshold.
+The interface is dark-themed and completely localized in English. It runs event polling and frame accumulation on an asynchronous background worker thread to guarantee a fluid, high-frame-rate user experience without GUI freezes or stutters.
 
 ---
 
-## Operating System & Virtualenv Setup 💡
+## 🔬 Neuromorphic Sensing: Engineering & Physics Principles
 
-The application is fully tailored and optimized for **Windows** platforms.
+Unlike traditional frame-based cameras that capture static full-frame snapshots at fixed intervals (e.g., 30 FPS or 60 FPS), **event-based vision sensors** (such as the Sony IMX636 / Prophesee EVK4) operate on bio-inspired neuromorphic principles:
 
-Because Metavision is a native platform SDK (installed globally on your machine under `C:\Program Files\Prophesee`) rather than a pip-installable public library, running it inside isolated Python virtual environments (`venv`) like those created by PyCharm can raise `ImportError` or native DLL load failures.
+1. **Asynchronous Delta Modulated Photoreceptors**:
+   Each independent pixel on the sensor contains an autonomous logarithmic photoreceptor circuit. Rather than transmitting intensity values on a clock, a pixel fires an **event** only when the local change in logarithmic illuminance ($\Delta \ln I$) exceeds a predefined physical threshold:
+   $$\Delta \ln I = \ln I(t) - \ln I(t - \Delta t) \ge \pm C$$
+   - **ON Event ($+C$)**: Fired when relative light intensity increases.
+   - **OFF Event ($-C$)**: Fired when relative light intensity decreases.
 
-To solve this, ensure your virtual environment has access to your system's global site-packages:
-1. In **PyCharm**, navigate to: `File -> Settings -> Project -> Python Interpreter`.
-2. Click the gear icon next to your Interpreter dropdown and select `Show All...`.
-3. Edit your active Interpreter configuration and make sure the option **"Inherit global site-packages"** is checked.
-4. Alternatively, recreate your environment with:
-   ```bash
-   python -m venv .venv --system-site-packages
-   ```
-This grants your project's virtual interpreter full native access to the globally registered Metavision python bindings and its binary C++ dependencies seamlessly!
+2. **Microsecond Temporal Resolution & High Dynamic Range**:
+   Events are timestamped with microsecond precision ($\mu s$), allowing tracking of ultra-fast movements (up to >10,000 events/sec per pixel) without motion blur, while achieving high dynamic range ($>120\text{ dB}$).
+
+3. **Data Efficiency & Zero Redundancy**:
+   When scene illuminance remains constant, zero events are transmitted—minimizing data rate, latency, and power consumption.
 
 ---
 
-## Requirements
+## ✨ Key Features
 
-Ensure you have installed the following Python prerequisites inside your interpreter environment:
+### 1. 🎥 Real-Time Live Event Visualization
+- Visualizes raw asynchronous event streams as accumulated 2D video frames (**ON events** as white pixels, **OFF events** as gray pixels).
+- Employs zero-allocation vectorized NumPy masking and uncompressed raw PPM binary rendering to update Tkinter image widgets without CPU-intensive PNG encoding overhead.
+
+### 2. 📊 High-Performance Event Rate Timeline Plot
+- Embeds a real-time `Matplotlib` dashboard tracking camera event throughput in thousands of events per second (`kEvt/sec`).
+- **Memory & Lag Optimization**: To eliminate memory leaks, GC pauses, or progressive GUI slowdown:
+  1. Utilizes `collections.deque` for $O(1)$ constant-time history trimming, bounding the sliding timeline window to **10 seconds**.
+  2. Uses direct line dataset updates (`line.set_data()`) and idle redraw calls (`canvas.draw_idle()`) rate-limited to 500ms intervals instead of costly `ax.clear()` axis wipes.
+- **Dynamic Accumulation Slider**: Adjusts accumulation time-windows on the fly (1ms to 100ms), modifying rate integration bases and live frame compilation dynamically.
+
+### 3. 🎛️ Full Hardware Bias & Parameter Tuning Sidebar
+Directly configure low-level sensor analog bias parameters on physical hardware via Metavision SDK HAL bindings:
+- `bias_diff`: Photoreceptor output reference level.
+- `bias_diff_on`: Contrast sensitivity threshold for ON events ($+C$).
+- `bias_diff_off`: Contrast sensitivity threshold for OFF events ($-C$).
+- `bias_fo`: Photoreceptor low-pass filter cutoff frequency.
+- `bias_hpf`: Differential amplifier high-pass filter cutoff frequency.
+- `bias_refr`: Pixel refractory dead-time period delay.
+- **Event Rate Controller (ERC)**: Hardware-level maximum event rate constraint module to throttle bandwidth spikes.
+- **Event Trail Filter**: Microsecond temporal noise filter targeting background thermal fluctuations.
+
+### 4. 💾 RAW Event Stream Recording
+- High-speed logging of uncompressed binary `.raw` event streams directly to disk.
+- Live real-time metric panel displaying duration, output file size (MB), accumulated event totals, and instantaneous event rate.
+
+---
+
+## 💻 Operating System & Virtualenv Setup
+
+The application is fully optimized for **Windows** and **Linux** platforms.
+
+Because Metavision is a native C++/Python platform SDK installed globally on host systems (e.g. under `C:\Program Files\Prophesee` on Windows or `/usr/include/metavision` on Linux), running inside isolated virtual environments (`venv`) may require system site-packages access.
+
+To ensure your virtual environment accesses global Metavision bindings:
+```bash
+python3 -m venv .venv --system-site-packages
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+```
+
+---
+
+## 📦 Requirements
+
+Install prerequisites in your active environment:
 
 ```bash
 pip install numpy opencv-python matplotlib pillow
@@ -60,21 +83,21 @@ pip install numpy opencv-python matplotlib pillow
 
 ---
 
-## Running the Application
+## 🚀 Running the Application
 
-To start the controller and viewer, run:
+To launch the event viewer and controller application:
 
 ```bash
 python3 event_recorder_app.py
 ```
 
-Click **"Connect to Physical Camera (USB) 🔌"** in the top header to dynamically scan and connect to your USB-connected Prophesee EVK4 camera.
+Click **"Connect Camera 🔌"** in the top header bar to automatically detect and initialize your USB Prophesee EVK4 sensor.
 
 ---
 
-## Running Unit Tests
+## 🧪 Running Unit Tests
 
-The repository includes a verification test suite:
+To run automated verification tests:
 
 ```bash
 python3 -m unittest test_app.py
