@@ -156,7 +156,14 @@ class EventRecorderApp(tk.Tk):
         title_lbl = ttk.Label(col1, text="Real-Time Live Event View", style="PanelTitle.TLabel")
         title_lbl.pack(anchor="nw", padx=15, pady=10)
 
-        self.image_label = tk.Label(col1, bg="#000000")
+        self.image_label = tk.Label(
+            col1,
+            bg="#000000",
+            fg="#8e8e93",
+            font=("Calibri", 14, "bold"),
+            text="📷 Camera Disconnected\n\nClick 'Connect Camera 🔌' above\nto start live stream",
+            justify="center"
+        )
         self.image_label.pack(fill="both", expand=True, padx=15, pady=15)
 
         # Column 2: Event Rate plot + Accumulation Slider (Middle)
@@ -224,18 +231,40 @@ class EventRecorderApp(tk.Tk):
     def build_control_panel(self, parent):
         """Right sidebar containing Biases parameters, ERC, and Trail Filter controls."""
         # Scrollable container for control params
-        canvas = tk.Canvas(parent, bg="#2c2c2e", highlightthickness=0)
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        scroll_frame = ttk.Frame(canvas, style="Panel.TFrame")
+        self.sidebar_canvas = tk.Canvas(parent, bg="#2c2c2e", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.sidebar_canvas.yview)
+        scroll_frame = ttk.Frame(self.sidebar_canvas, style="Panel.TFrame")
 
         scroll_frame.bind(
             "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            lambda e: self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all"))
         )
-        canvas.create_window((0, 0), window=scroll_frame, anchor="nw", width=360)
-        canvas.configure(yscrollcommand=scrollbar.set)
+        self.sidebar_canvas.create_window((0, 0), window=scroll_frame, anchor="nw", width=360)
+        self.sidebar_canvas.configure(yscrollcommand=scrollbar.set)
 
-        canvas.pack(side="left", fill="both", expand=True)
+        # Enable mouse wheel and trackpad scrolling when hovering over settings sidebar
+        def _on_mousewheel(event):
+            if event.num == 4:
+                self.sidebar_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.sidebar_canvas.yview_scroll(1, "units")
+            elif event.delta:
+                self.sidebar_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mousewheel(event):
+            self.sidebar_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            self.sidebar_canvas.bind_all("<Button-4>", _on_mousewheel)
+            self.sidebar_canvas.bind_all("<Button-5>", _on_mousewheel)
+
+        def _unbind_mousewheel(event):
+            self.sidebar_canvas.unbind_all("<MouseWheel>")
+            self.sidebar_canvas.unbind_all("<Button-4>")
+            self.sidebar_canvas.unbind_all("<Button-5>")
+
+        self.sidebar_canvas.bind("<Enter>", _bind_mousewheel)
+        self.sidebar_canvas.bind("<Leave>", _unbind_mousewheel)
+
+        self.sidebar_canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
         # SDK / Connection Status Box
@@ -412,11 +441,12 @@ class EventRecorderApp(tk.Tk):
         self.slicer_instance = None
         self.camera_instance = None
 
-        # Reset live image label to black
-        img_black = np.zeros((440, 620, 3), dtype=np.uint8)
-        _, buffer = cv2.imencode('.png', img_black)
-        self.tk_image = tk.PhotoImage(data=buffer.tobytes())
-        self.image_label.config(image=self.tk_image)
+        # Reset live image label with disconnected empty state guidance
+        self.tk_image = None
+        self.image_label.config(
+            image="",
+            text="📷 Camera Disconnected\n\nClick 'Connect Camera 🔌' above\nto start live stream"
+        )
 
         self.update_sdk_status()
         messagebox.showinfo("Disconnected", "Physical camera has been safely disconnected.")
@@ -608,6 +638,8 @@ class EventRecorderApp(tk.Tk):
 
             raw_ppm = self._ppm_header + img_resized.tobytes()
 
+            if self.image_label.cget("text"):
+                self.image_label.config(text="")
             self.tk_image = tk.PhotoImage(data=raw_ppm)
             self.image_label.config(image=self.tk_image)
 
