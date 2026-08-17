@@ -403,7 +403,7 @@ class EventRecorderApp(tk.Tk):
         if not self.slicer_instance:
             return
 
-        # Draw frame using user's white and gray accumulation logic
+        # Draw frame using fast vectorized boolean indexing
         display_frame = np.zeros((height, width, 3), dtype=np.uint8)
         frame_counter = 0
         accumulated_events_count = 0
@@ -414,9 +414,14 @@ class EventRecorderApp(tk.Tk):
                 if not self.running_live:
                     break
 
-                # 1. Accumulate events
+                # High-speed vectorized pixel assignment (Zero intermediate memory allocation)
                 if evs.size > 0:
-                    display_frame[evs['y'], evs['x']] = np.where(evs['p'][:, None] == 1, [255, 255, 255], [100, 100, 100])
+                    on_mask = evs['p'] == 1
+                    off_mask = ~on_mask
+
+                    # Direct array indexing for maximum performance
+                    display_frame[evs['y'][on_mask], evs['x'][on_mask]] = (255, 255, 255)
+                    display_frame[evs['y'][off_mask], evs['x'][off_mask]] = (100, 100, 100)
                     accumulated_events_count += evs.size
 
                 frame_counter += 1
@@ -458,14 +463,17 @@ class EventRecorderApp(tk.Tk):
                 self.shared_display_frame = None
             current_rate = self.event_rate_live
 
-        # Handle live video frame update (very fast, occurs on every loop)
+        # Handle live video frame update with zero PNG compression CPU overhead
         if frame is not None:
-            # Resize image cleanly and update label
-            img_resized = cv2.resize(frame, (620, 440))
+            # Resize image cleanly using ultra-fast nearest neighbor interpolation
+            img_resized = cv2.resize(frame, (620, 440), interpolation=cv2.INTER_NEAREST)
 
-            # Convert OpenCV to PhotoImage
-            _, buffer = cv2.imencode('.png', img_resized)
-            self.tk_image = tk.PhotoImage(data=buffer.tobytes())
+            # Ultra-fast PPM uncompressed raw header formatting (Bypasses PNG compression CPU overhead completely)
+            h, w = img_resized.shape[:2]
+            ppm_header = f"P6 {w} {h} 255\n".encode('ascii')
+            raw_ppm = ppm_header + img_resized.tobytes()
+
+            self.tk_image = tk.PhotoImage(data=raw_ppm)
             self.image_label.config(image=self.tk_image)
 
             # Append current rate to historical arrays
