@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import threading
+from collections import deque
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -59,9 +60,9 @@ class EventRecorderApp(tk.Tk):
         self.camera_instance = None
         self.camera_thread = None
 
-        # Plotting & Stats History
-        self.time_history = []
-        self.rate_history = []
+        # Plotting & Stats History (using collections.deque for O(1) popping)
+        self.time_history = deque()
+        self.rate_history = deque()
         self.start_app_time = time.time()
         self.event_rate_live = 0.0
         self.last_graph_update_time = 0.0  # Decoupled graph plotting rate limiter
@@ -533,7 +534,7 @@ class EventRecorderApp(tk.Tk):
         if not self.slicer_instance:
             return
 
-        # Draw frame using fast vectorized boolean indexing
+        # Pre-allocate display buffer once to avoid reallocating numpy arrays on every accumulation window cycle
         display_frame = np.zeros((height, width, 3), dtype=np.uint8)
         frame_counter = 0
         accumulated_events_count = 0
@@ -575,8 +576,8 @@ class EventRecorderApp(tk.Tk):
                         if self.recording_active:
                             self.total_recorded_events += accumulated_events_count
 
-                    # Clear canvas for the next block to prevent smearing
-                    display_frame = np.zeros((height, width, 3), dtype=np.uint8)
+                    # Clear existing pre-allocated canvas for the next block (avoids GC churn)
+                    display_frame.fill(0)
                     frame_counter = 0
                     accumulated_events_count = 0
                     last_calc_time = now
@@ -600,10 +601,12 @@ class EventRecorderApp(tk.Tk):
             # Resize image cleanly using ultra-fast nearest neighbor interpolation
             img_resized = cv2.resize(frame, (620, 440), interpolation=cv2.INTER_NEAREST)
 
-            # Ultra-fast PPM uncompressed raw header formatting (Bypasses PNG compression CPU overhead completely)
-            h, w = img_resized.shape[:2]
-            ppm_header = f"P6 {w} {h} 255\n".encode('ascii')
-            raw_ppm = ppm_header + img_resized.tobytes()
+            # Pre-computed cached PPM header (620x440) eliminates string formatting and ASCII encoding overhead on every 20ms frame
+            if not hasattr(self, '_ppm_header') or getattr(self, '_ppm_dimensions', None) != (620, 440):
+                self._ppm_dimensions = (620, 440)
+                self._ppm_header = b"P6 620 440 255\n"
+
+            raw_ppm = self._ppm_header + img_resized.tobytes()
 
             self.tk_image = tk.PhotoImage(data=raw_ppm)
             self.image_label.config(image=self.tk_image)
@@ -613,10 +616,10 @@ class EventRecorderApp(tk.Tk):
             self.time_history.append(elapsed)
             self.rate_history.append(current_rate / 1000.0) # Convert to kEvt/sec
 
-            # Bound the rolling timeline history to exactly 10 seconds of data.
+            # Bound the rolling timeline history to exactly 10 seconds of data using O(1) deque.popleft()
             while self.time_history and (elapsed - self.time_history[0] > 10.0):
-                self.time_history.pop(0)
-                self.rate_history.pop(0)
+                self.time_history.popleft()
+                self.rate_history.popleft()
 
             # Plot timeline updates at a decoupled rate (maximum once per 500ms)
             # This completely resolves CPU exhaustion and progressive GUI freezing/lag!
