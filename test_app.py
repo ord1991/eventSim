@@ -76,6 +76,40 @@ class TestEventRecorderApp(unittest.TestCase):
         finally:
             app.destroy()
 
+    def test_ux_enhancements_tooltips_status_and_shortcuts(self):
+        import event_recorder_app
+        try:
+            app = event_recorder_app.EventRecorderApp()
+        except Exception as e:
+            self.skipTest(f"Tkinter display not available: {e}")
+
+        try:
+            # Test ToolTip class initialization and show/hide
+            tooltip = event_recorder_app.ToolTip(app.connect_btn, "Test tooltip text")
+            self.assertEqual(tooltip.text, "Test tooltip text")
+            tooltip.show_tooltip()
+            self.assertIsNotNone(tooltip.tip_window)
+            tooltip.hide_tooltip()
+            self.assertIsNone(tooltip.tip_window)
+
+            # Test non-blocking status message helper
+            app.show_status_message("Test Status Message")
+            self.assertEqual(app.status_msg_lbl.cget("text"), "Test Status Message")
+
+            # Test Escape shortcut clears ROI and updates status bar directly
+            app.roi_active = True
+            app.roi_box = (0.1, 0.1, 0.5, 0.5)
+            app.clear_roi()
+            self.assertFalse(app.roi_active)
+            self.assertIsNone(app.roi_box)
+            self.assertEqual(app.status_msg_lbl.cget("text"), "ROI selection cleared.")
+
+            # Test header recording badge existence
+            self.assertTrue(hasattr(app, "header_rec_badge"))
+            self.assertEqual(app.header_rec_badge.cget("text"), "🔴 REC")
+        finally:
+            app.destroy()
+
     def test_path_traversal_prevention(self):
         import event_recorder_app
         from pathlib import Path
