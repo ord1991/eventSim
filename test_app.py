@@ -24,6 +24,22 @@ class TestEventRecorderApp(unittest.TestCase):
             # Check sidebar_canvas exists
             self.assertTrue(hasattr(app, "sidebar_canvas"))
             self.assertIsNotNone(app.sidebar_canvas)
+
+            # Check new visualization variables and controls
+            self.assertEqual(app.viz_mode.get(), "Accumulation")
+            self.assertEqual(app.color_palette.get(), "Monochrome")
+
+            # Check chart visibility variables
+            self.assertTrue(app.show_timeline.get())
+            self.assertTrue(app.show_ratio.get())
+
+            # Test chart visibility toggling & dynamic grid refresh
+            app.show_isi.set(False)
+            app.refresh_graph_layout()
+
+            # Test ROI clear
+            app.clear_roi()
+            self.assertFalse(app.roi_active)
         finally:
             app.destroy()
 

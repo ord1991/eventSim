@@ -31,31 +31,30 @@ Unlike traditional frame-based cameras that capture static full-frame snapshots 
 
 ## ✨ Key Features
 
-### 1. 🎥 Real-Time Live Event Visualization
-- Visualizes raw asynchronous event streams as accumulated 2D video frames (**ON events** as white pixels, **OFF events** as gray pixels).
-- Employs zero-allocation vectorized NumPy masking and uncompressed raw PPM binary rendering to update Tkinter image widgets without CPU-intensive PNG encoding overhead.
+### 1. 🎥 Real-Time Live Event Visualization & Modes
+- Visualizes raw asynchronous event streams as accumulated 2D video frames.
+- **Visualization Modes**: Toggle between **Accumulation** and **Time-Surface Decay** (exponential event temporal trails).
+- **Custom Color Palettes**: Choose between **Monochrome** (White/Gray), **Red/Blue**, **Green/Red**, and **Heatmap** modes.
+- **Region of Interest (ROI) Selection**: Drag a bounding box on the stream to isolate and count events only within a targeted region.
+- **Snapshot Capture**: Capture high-resolution viewer frames directly to `.png` with a single click.
 
-### 2. 📊 High-Performance Event Rate Timeline Plot
-- Embeds a real-time `Matplotlib` dashboard tracking camera event throughput in thousands of events per second (`kEvt/sec`).
-- **Memory & Lag Optimization**: To eliminate memory leaks, GC pauses, or progressive GUI slowdown:
-  1. Utilizes `collections.deque` for $O(1)$ constant-time history trimming, bounding the sliding timeline window to **10 seconds**.
-  2. Uses direct line dataset updates (`line.set_data()`) and idle redraw calls (`canvas.draw_idle()`) rate-limited to 500ms intervals instead of costly `ax.clear()` axis wipes.
-- **Dynamic Accumulation Slider**: Adjusts accumulation time-windows on the fly (1ms to 100ms), modifying rate integration bases and live frame compilation dynamically.
+### 2. 📊 Dynamic Analytics Grid & Graph Visibility Controls
+- **Toggle Dropdown Menu (`Graphs Select 📊`)**: Interactively enable or disable individual analytics charts with real-time automatic grid reconfiguration:
+  1. **Event Rate Timeline**: Rolling 10-second history of camera event throughput (`kEvt/sec`).
+  2. **ON / OFF Event Ratio**: Tracks polarity sensitivity balance ($+C$ vs $-C$).
+  3. **2D Spatial Activity Profile**: X-axis event spatial density distribution across sensor width.
+  4. **Inter-Event Interval (ISI)**: Temporal delta-t distribution for thermal noise vs signal discrimination.
 
-### 3. 🎛️ Full Hardware Bias & Parameter Tuning Sidebar
-Directly configure low-level sensor analog bias parameters on physical hardware via Metavision SDK HAL bindings:
-- `bias_diff`: Photoreceptor output reference level.
-- `bias_diff_on`: Contrast sensitivity threshold for ON events ($+C$).
-- `bias_diff_off`: Contrast sensitivity threshold for OFF events ($-C$).
-- `bias_fo`: Photoreceptor low-pass filter cutoff frequency.
-- `bias_hpf`: Differential amplifier high-pass filter cutoff frequency.
-- `bias_refr`: Pixel refractory dead-time period delay.
-- **Event Rate Controller (ERC)**: Hardware-level maximum event rate constraint module to throttle bandwidth spikes.
-- **Event Trail Filter**: Microsecond temporal noise filter targeting background thermal fluctuations.
+### 3. 🎛️ Full Hardware Bias Tuning & Auto-Calibration Wizard
+Directly configure low-level sensor analog bias parameters on physical hardware:
+- `bias_diff`, `bias_diff_on`, `bias_diff_off`, `bias_fo`, `bias_hpf`, `bias_refr`.
+- **Auto-Calibrate Biases Wizard 🪄**: One-click automated calibration routine that samples background noise and auto-tunes contrast thresholds.
+- **Event Rate Controller (ERC)** & **Event Trail Filter**: Bandwidth constraint and microsecond noise filtering modules.
 
-### 4. 💾 RAW Event Stream Recording
-- High-speed logging of uncompressed binary `.raw` event streams directly to disk.
-- Live real-time metric panel displaying duration, output file size (MB), accumulated event totals, and instantaneous event rate.
+### 4. 💾 RAW Recording, Replay Player & MP4 Export
+- **RAW Recording**: High-speed logging of binary `.raw` streams directly to disk.
+- **RAW File Replay Player 🎬**: Load and play back `.raw` files with Play/Pause and variable playback speeds (0.25x, 0.5x, 1.0x, 2.0x).
+- **RAW to MP4 Export 🎥**: Convert recorded `.raw` event streams into playable `.mp4` video files.
 
 ---
 
