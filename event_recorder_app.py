@@ -30,6 +30,56 @@ matplotlib.use('TkAgg')
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+class ToolTip:
+    """Displays a hover tooltip hint window for any Tkinter widget."""
+    def __init__(self, widget, text, delay_ms=350):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self.tip_window = None
+        self._timer_id = None
+        self.widget.bind("<Enter>", self._on_enter, add="+")
+        self.widget.bind("<Leave>", self._on_leave, add="+")
+        self.widget.bind("<ButtonPress>", self._on_leave, add="+")
+
+    def _on_enter(self, event=None):
+        self._schedule()
+
+    def _on_leave(self, event=None):
+        self._unschedule()
+        self.hide_tooltip()
+
+    def _schedule(self):
+        self._unschedule()
+        self._timer_id = self.widget.after(self.delay_ms, self.show_tooltip)
+
+    def _unschedule(self):
+        if self._timer_id:
+            self.widget.after_cancel(self._timer_id)
+            self._timer_id = None
+
+    def show_tooltip(self):
+        if self.tip_window or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 10
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            tw, text=self.text, justify="left",
+            bg="#3a3a3c", fg="#ffffff", relief="solid", borderwidth=1,
+            font=("Calibri", 9, "normal"), padx=6, pady=3
+        )
+        label.pack(ipadx=1)
+
+    def hide_tooltip(self):
+        tw = self.tip_window
+        self.tip_window = None
+        if tw:
+            tw.destroy()
+
+
 # Default EVK4 / IMX636 Biases (relative offsets around default value 0)
 EVK4_BIAS_DEFAULTS = {
     "bias_diff": {"value": 0, "min": -25, "max": 23, "desc": "Photoreceptor output reference level"},
@@ -129,9 +179,25 @@ class EventRecorderApp(tk.Tk):
         # Build layout
         self.create_layout()
 
+        # Bind Global Keyboard Shortcuts
+        self.bind("<Escape>", lambda e: self.clear_roi())
+        self.bind("<Control-s>", lambda e: self.take_snapshot())
+        self.bind("<Control-S>", lambda e: self.take_snapshot())
+        self.bind("<Control-r>", lambda e: self.toggle_recording())
+        self.bind("<Control-R>", lambda e: self.toggle_recording())
+        self.bind("<space>", lambda e: self._handle_space_shortcut())
+
         # Check SDK and status
         self.update_sdk_status()
         self.update_loop()
+
+    def _handle_space_shortcut(self):
+        """Spacebar shortcut toggles replay playback if focus is not inside a text Entry widget."""
+        focus_widget = self.focus_get()
+        if isinstance(focus_widget, (tk.Entry, ttk.Entry)):
+            return
+        if self.replay_active or self.replay_file_path.get():
+            self.toggle_replay()
 
     def configure_dark_theme(self):
         """Custom colors to create a modern dark design."""
@@ -173,11 +239,14 @@ class EventRecorderApp(tk.Tk):
         header_label = tk.Label(header_frame, text="Prophesee Event Camera Connection & Tuning System", bg="#2c2c2e", fg="#0a84ff", font=("Calibri", 15, "bold"))
         header_label.pack(side="left", padx=15, pady=10)
 
+        # Recording Visual Badge Header Indicator
+        self.header_rec_badge = tk.Label(header_frame, text="🔴 REC", bg="#ff453a", fg="#ffffff", font=("Calibri", 11, "bold"), padx=8, pady=2)
+
         btn_box = tk.Frame(header_frame, bg="#2c2c2e")
         btn_box.pack(side="right", padx=15, pady=5)
 
         # Graphs Dropdown Selector
-        graph_mb = tk.Menubutton(btn_box, text="Graphs Select 📊", bg="#3a3a3c", fg="#ffffff", activebackground="#48484a", activeforeground="#ffffff", relief="flat", font=("Calibri", 11, "bold"), direction="below")
+        graph_mb = tk.Menubutton(btn_box, text="Graphs Select 📊", bg="#3a3a3c", fg="#ffffff", activebackground="#48484a", activeforeground="#ffffff", relief="flat", font=("Calibri", 11, "bold"), direction="below", cursor="hand2")
         graph_menu = tk.Menu(graph_mb, tearoff=0, bg="#2c2c2e", fg="#ffffff", activebackground="#0a84ff", activeforeground="#ffffff")
         graph_mb.config(menu=graph_menu)
         graph_menu.add_checkbutton(label="Event Rate Timeline", variable=self.show_timeline, command=self.refresh_graph_layout)
@@ -185,12 +254,15 @@ class EventRecorderApp(tk.Tk):
         graph_menu.add_checkbutton(label="2D Spatial Activity", variable=self.show_spatial, command=self.refresh_graph_layout)
         graph_menu.add_checkbutton(label="ISI Distribution (dt)", variable=self.show_isi, command=self.refresh_graph_layout)
         graph_mb.pack(side="left", padx=5)
+        ToolTip(graph_mb, "Toggle visibility of analytics charts")
 
-        self.connect_btn = ttk.Button(btn_box, text="Connect Camera 🔌", style="Action.TButton", command=self.connect_to_physical_camera)
+        self.connect_btn = ttk.Button(btn_box, text="Connect Camera 🔌", style="Action.TButton", command=self.connect_to_physical_camera, cursor="hand2")
         self.connect_btn.pack(side="left", padx=5)
+        ToolTip(self.connect_btn, "Connect to Prophesee EVK4 physical USB camera")
 
-        self.disconnect_btn = ttk.Button(btn_box, text="Disconnect Camera ❌", style="TButton", command=self.disconnect_camera)
+        self.disconnect_btn = ttk.Button(btn_box, text="Disconnect Camera ❌", style="TButton", command=self.disconnect_camera, cursor="hand2")
         self.disconnect_btn.pack(side="left", padx=5)
+        ToolTip(self.disconnect_btn, "Safely disconnect active camera session")
 
         # Main Work Area
         main_container = ttk.Frame(self)
@@ -219,11 +291,13 @@ class EventRecorderApp(tk.Tk):
         pal_combo = ttk.Combobox(viz_ctrl_box, textvariable=self.color_palette, values=["Monochrome", "Red/Blue", "Green/Red", "Heatmap"], state="readonly", width=11)
         pal_combo.pack(side="left", padx=3)
 
-        clear_roi_btn = ttk.Button(viz_ctrl_box, text="Clear ROI", width=8, command=self.clear_roi)
+        clear_roi_btn = ttk.Button(viz_ctrl_box, text="Clear ROI", width=8, command=self.clear_roi, cursor="hand2")
         clear_roi_btn.pack(side="left", padx=3)
+        ToolTip(clear_roi_btn, "Reset Region of Interest selection (Esc)")
 
-        snap_btn = ttk.Button(viz_ctrl_box, text="Snapshot 📸", width=11, command=self.take_snapshot)
+        snap_btn = ttk.Button(viz_ctrl_box, text="Snapshot 📸", width=11, command=self.take_snapshot, cursor="hand2")
         snap_btn.pack(side="left", padx=3)
+        ToolTip(snap_btn, "Save frame snapshot as image file (Ctrl+S)")
 
         self.image_label = tk.Label(
             col1,
@@ -272,6 +346,22 @@ class EventRecorderApp(tk.Tk):
         col3.pack_propagate(False)
         self.build_control_panel(col3)
 
+        # Bottom Non-Blocking Status Feedback Bar (Toast Banner)
+        self.bottom_status_bar = tk.Frame(self, bg="#1c1c1e", height=26)
+        self.bottom_status_bar.pack(side="bottom", fill="x", padx=10, pady=(0, 5))
+        self.bottom_status_bar.pack_propagate(False)
+
+        self.status_msg_lbl = tk.Label(
+            self.bottom_status_bar,
+            text="Ready",
+            bg="#1c1c1e",
+            fg="#8e8e93",
+            font=("Calibri", 10, "italic"),
+            anchor="w"
+        )
+        self.status_msg_lbl.pack(side="left", padx=5)
+        self._status_timer_id = None
+
     def build_graph_panel(self, parent):
         """Middle panel containing multi-chart Matplotlib grid and accumulation slider below it."""
         title_lbl = ttk.Label(parent, text="Dynamic Neuromorphic Event Analytics", style="PanelTitle.TLabel")
@@ -306,10 +396,12 @@ class EventRecorderApp(tk.Tk):
             command=self.on_graph_accumulation_slider_moved
         )
         graph_acc_slider.pack(fill="x", expand=True, side="left", padx=5)
+        ToolTip(graph_acc_slider, "Adjust plot event window (0.1 µs to 100,000 µs)")
 
         # Entry text box connected to graph accumulation time (µs)
         self.graph_acc_entry = ttk.Entry(acc_control_frame, textvariable=self.graph_accumulation_entry_var, width=10, justify="center")
         self.graph_acc_entry.pack(side="right", padx=5)
+        ToolTip(self.graph_acc_entry, "Directly type accumulation window in microseconds")
 
         unit_lbl = ttk.Label(acc_control_frame, text="µs", style="PanelSec.TLabel", font=("Calibri", 10, "bold"), foreground="#30d158")
         unit_lbl.pack(side="right", padx=2)
@@ -372,10 +464,21 @@ class EventRecorderApp(tk.Tk):
         self.fig.tight_layout()
         self.canvas.draw_idle()
 
+    def show_status_message(self, message, timeout_ms=3500):
+        """Displays non-blocking status message at bottom status bar."""
+        if hasattr(self, '_status_timer_id') and self._status_timer_id:
+            self.after_cancel(self._status_timer_id)
+            self._status_timer_id = None
+
+        if hasattr(self, 'status_msg_lbl'):
+            self.status_msg_lbl.config(text=message, fg="#30d158")
+            self._status_timer_id = self.after(timeout_ms, lambda: self.status_msg_lbl.config(text="Ready", fg="#8e8e93"))
+
     def clear_roi(self):
         """Resets the active Region of Interest selection."""
         self.roi_active = False
         self.roi_box = None
+        self.show_status_message("ROI selection cleared.")
 
     def on_roi_start(self, event):
         w = self.image_label.winfo_width()
@@ -508,8 +611,9 @@ class EventRecorderApp(tk.Tk):
         bias_section = ttk.LabelFrame(scroll_frame, text="Hardware Biases (EVK4/IMX636)", style="Panel.TFrame")
         bias_section.pack(fill="x", padx=10, pady=5)
 
-        auto_calib_btn = ttk.Button(bias_section, text="Auto-Calibrate Biases 🪄", style="Action.TButton", command=self.run_auto_calibration)
+        auto_calib_btn = ttk.Button(bias_section, text="Auto-Calibrate Biases 🪄", style="Action.TButton", command=self.run_auto_calibration, cursor="hand2")
         auto_calib_btn.pack(fill="x", padx=5, pady=6)
+        ToolTip(auto_calib_btn, "Automatically measure background noise and calibrate ON/OFF contrast thresholds")
 
         self.bias_vars = {}
         self.bias_val_labels = {}
@@ -537,6 +641,7 @@ class EventRecorderApp(tk.Tk):
                 command=lambda val, n=name: self.on_bias_slider_moved(n, val)
             )
             slider.pack(fill="x", expand=True, side="bottom", padx=5, pady=2)
+            ToolTip(slider, f"{name}: {info['desc']} (Range: {info['min']} to {info['max']})")
 
             desc_lbl = ttk.Label(b_frame, text=info["desc"], style="PanelSec.TLabel", font=("Calibri", 9), foreground="#aeaeae")
             desc_lbl.pack(side="bottom", anchor="w", padx=5)
@@ -581,7 +686,7 @@ class EventRecorderApp(tk.Tk):
         dir_f = ttk.Frame(rec_section, style="Panel.TFrame")
         dir_f.pack(fill="x", padx=5, pady=4)
         ttk.Label(dir_f, text="Output Directory:", style="PanelSec.TLabel").pack(side="left")
-        dir_browse_btn = ttk.Button(dir_f, text="Browse...", width=8, command=self.choose_recording_directory)
+        dir_browse_btn = ttk.Button(dir_f, text="Browse...", width=8, command=self.choose_recording_directory, cursor="hand2")
         dir_browse_btn.pack(side="right")
 
         dir_entry = ttk.Entry(rec_section, textvariable=self.recording_dir)
@@ -595,11 +700,13 @@ class EventRecorderApp(tk.Tk):
         file_entry.pack(side="right")
 
         # Start/Stop Recording Button
-        self.record_btn = ttk.Button(rec_section, text="Start Recording 🔴", style="TButton", command=self.toggle_recording)
+        self.record_btn = ttk.Button(rec_section, text="Start Recording 🔴", style="TButton", command=self.toggle_recording, cursor="hand2")
         self.record_btn.pack(fill="x", padx=5, pady=4)
+        ToolTip(self.record_btn, "Start or stop RAW event stream recording (Ctrl+R)")
 
-        export_mp4_btn = ttk.Button(rec_section, text="Export RAW to MP4 🎥", style="TButton", command=self.export_mp4_video)
+        export_mp4_btn = ttk.Button(rec_section, text="Export RAW to MP4 🎥", style="TButton", command=self.export_mp4_video, cursor="hand2")
         export_mp4_btn.pack(fill="x", padx=5, pady=4)
+        ToolTip(export_mp4_btn, "Render recorded .raw event file to MP4 video format")
 
         # 4. RAW File Replay Section
         replay_section = ttk.LabelFrame(scroll_frame, text="RAW File Replay Player 🎬", style="Panel.TFrame")
@@ -608,15 +715,17 @@ class EventRecorderApp(tk.Tk):
         file_choose_f = ttk.Frame(replay_section, style="Panel.TFrame")
         file_choose_f.pack(fill="x", padx=5, pady=4)
         ttk.Label(file_choose_f, text="File:", style="PanelSec.TLabel").pack(side="left")
-        ttk.Button(file_choose_f, text="Select RAW...", width=12, command=self.choose_replay_file).pack(side="right")
+        select_raw_btn = ttk.Button(file_choose_f, text="Select RAW...", width=12, command=self.choose_replay_file, cursor="hand2")
+        select_raw_btn.pack(side="right")
 
         ttk.Entry(replay_section, textvariable=self.replay_file_path, state="readonly").pack(fill="x", padx=5, pady=2)
 
         ctrl_f = ttk.Frame(replay_section, style="Panel.TFrame")
         ctrl_f.pack(fill="x", padx=5, pady=6)
 
-        self.play_btn = ttk.Button(ctrl_f, text="Play ◀", width=8, command=self.toggle_replay)
+        self.play_btn = ttk.Button(ctrl_f, text="Play ◀", width=8, command=self.toggle_replay, cursor="hand2")
         self.play_btn.pack(side="left", padx=2)
+        ToolTip(self.play_btn, "Play or pause .raw event stream playback (Spacebar)")
 
         ttk.Label(ctrl_f, text="Speed:", style="PanelSec.TLabel").pack(side="left", padx=5)
         speed_combo = ttk.Combobox(ctrl_f, textvariable=self.replay_speed, values=[0.25, 0.5, 1.0, 2.0], state="readonly", width=5)
@@ -767,6 +876,7 @@ class EventRecorderApp(tk.Tk):
             # OpenCV uses BGR ordering for imwrite
             bgr_frame = cv2.cvtColor(self._resized_buf, cv2.COLOR_RGB2BGR)
             cv2.imwrite(save_path, bgr_frame)
+            self.show_status_message(f"Snapshot saved: {os.path.basename(save_path)}")
             messagebox.showinfo("Snapshot Saved", f"Frame snapshot saved to:\n{save_path}")
 
     def export_mp4_video(self):
@@ -1014,6 +1124,8 @@ class EventRecorderApp(tk.Tk):
                 self.recorded_bytes = 0
 
                 self.record_btn.config(text="Stop Recording ⏹", style="RecordOn.TButton")
+                self.header_rec_badge.pack(side="left", padx=10, pady=10)
+                self.show_status_message(f"Recording started: {full_path.name}")
             except Exception as e:
                 messagebox.showerror("Recording Error", f"Failed to start RAW recording:\n{e}")
         else:
@@ -1028,6 +1140,8 @@ class EventRecorderApp(tk.Tk):
                 self.recording_active = False
                 self.active_recording_path = None
                 self.record_btn.config(text="Start Recording 🔴", style="TButton")
+                self.header_rec_badge.pack_forget()
+                self.show_status_message(f"Recording saved: {saved_path.name if saved_path else ''}")
                 messagebox.showinfo("Recording Saved", f"Recording saved successfully to:\n{saved_path}")
             except Exception as e:
                 messagebox.showerror("Recording Error", f"Failed to stop RAW recording:\n{e}")
