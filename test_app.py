@@ -76,5 +76,49 @@ class TestEventRecorderApp(unittest.TestCase):
         finally:
             app.destroy()
 
+    def test_path_traversal_prevention(self):
+        import event_recorder_app
+        from pathlib import Path
+        try:
+            app = event_recorder_app.EventRecorderApp()
+        except Exception as e:
+            self.skipTest(f"Tkinter display not available: {e}")
+
+        try:
+            base_test_dir = str(Path("/tmp/evk_test_recordings").resolve())
+            app.recording_dir.set(base_test_dir)
+
+            # 1. Test normal safe filename
+            app.recording_filename.get()
+            app.recording_filename.set("normal_recording.raw")
+            base_dir, full_path = app.get_safe_recording_path()
+            self.assertIsNotNone(base_dir)
+            self.assertIsNotNone(full_path)
+            self.assertEqual(full_path, Path(base_test_dir) / "normal_recording.raw")
+
+            # 2. Test relative path traversal injection (e.g., ../../etc/passwd)
+            app.recording_filename.set("../../etc/passwd")
+            base_dir, full_path = app.get_safe_recording_path()
+            self.assertIsNotNone(base_dir)
+            self.assertIsNotNone(full_path)
+            self.assertEqual(full_path, Path(base_test_dir) / "passwd")
+            self.assertTrue(full_path.is_relative_to(Path(base_test_dir)))
+
+            # 3. Test absolute path traversal injection (e.g., /etc/shadow)
+            app.recording_filename.set("/etc/shadow")
+            base_dir, full_path = app.get_safe_recording_path()
+            self.assertIsNotNone(base_dir)
+            self.assertIsNotNone(full_path)
+            self.assertEqual(full_path, Path(base_test_dir) / "shadow")
+            self.assertTrue(full_path.is_relative_to(Path(base_test_dir)))
+
+            # 4. Test invalid / empty filename
+            app.recording_filename.set("    ")
+            base_dir, full_path = app.get_safe_recording_path()
+            self.assertIsNone(base_dir)
+            self.assertIsNone(full_path)
+        finally:
+            app.destroy()
+
 if __name__ == "__main__":
     unittest.main()

@@ -109,6 +109,7 @@ class EventRecorderApp(tk.Tk):
         self._prev_recording_active = False
         self.recording_dir = tk.StringVar(value=str(Path.home()))
         self.recording_filename = tk.StringVar(value="event_recording.raw")
+        self.active_recording_path = None
         self.record_start_time = 0.0
         self.total_recorded_events = 0
         self.recorded_bytes = 0
@@ -956,6 +957,30 @@ class EventRecorderApp(tk.Tk):
         if folder:
             self.recording_dir.set(folder)
 
+    def get_safe_recording_path(self):
+        """
+        Sanitizes and resolves recording directory and filename to prevent path traversal attacks.
+        Returns (base_dir, full_path) or (None, None) if invalid or unsafe.
+        """
+        out_dir = self.recording_dir.get().strip()
+        out_name = self.recording_filename.get().strip()
+        if not out_dir or not out_name:
+            return None, None
+
+        # Strip directory components from filename to prevent path traversal
+        safe_filename = os.path.basename(out_name)
+        if not safe_filename:
+            return None, None
+
+        base_dir = Path(out_dir).resolve()
+        full_path = (base_dir / safe_filename).resolve()
+
+        # Security check: Ensure target path remains strictly within intended output directory
+        if not full_path.is_relative_to(base_dir):
+            return None, None
+
+        return base_dir, full_path
+
     def toggle_recording(self):
         """Starts or stops RAW event stream recording."""
         if not self.recording_active:
@@ -963,14 +988,16 @@ class EventRecorderApp(tk.Tk):
                 messagebox.showerror("Recording Error", "Please connect to a physical camera before starting a recording.")
                 return
 
-            out_dir = self.recording_dir.get()
-            out_name = self.recording_filename.get()
-            if not out_dir or not out_name:
-                messagebox.showerror("Recording Error", "Please specify a valid directory and filename.")
+            base_dir, full_path = self.get_safe_recording_path()
+            if not base_dir or not full_path:
+                messagebox.showerror("Recording Error", "Invalid output directory or filename provided (path traversal detected or empty).")
                 return
 
-            full_path = os.path.join(out_dir, out_name)
-            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            try:
+                base_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("Recording Error", f"Failed to create output directory:\n{e}")
+                return
 
             try:
                 # Access HAL EventsStream facility
@@ -979,8 +1006,9 @@ class EventRecorderApp(tk.Tk):
                     messagebox.showerror("Recording Error", "Camera device does not support I_EventsStream recording facility.")
                     return
 
-                stream.log_raw_data(full_path)
+                stream.log_raw_data(str(full_path))
                 self.recording_active = True
+                self.active_recording_path = full_path
                 self.record_start_time = time.time()
                 self.total_recorded_events = 0
                 self.recorded_bytes = 0
@@ -996,10 +1024,11 @@ class EventRecorderApp(tk.Tk):
                     if stream:
                         stream.stop_log_raw_data()
 
+                saved_path = self.active_recording_path
                 self.recording_active = False
+                self.active_recording_path = None
                 self.record_btn.config(text="Start Recording 🔴", style="TButton")
-                full_path = os.path.join(self.recording_dir.get(), self.recording_filename.get())
-                messagebox.showinfo("Recording Saved", f"Recording saved successfully to:\n{full_path}")
+                messagebox.showinfo("Recording Saved", f"Recording saved successfully to:\n{saved_path}")
             except Exception as e:
                 messagebox.showerror("Recording Error", f"Failed to stop RAW recording:\n{e}")
 
@@ -1250,11 +1279,10 @@ class EventRecorderApp(tk.Tk):
                     self.canvas.draw_idle()
 
         # Update recording statistics only when active or when transitioning from active to inactive
-        if self.recording_active:
+        if self.recording_active and self.active_recording_path:
             dur = time.time() - self.record_start_time
-            full_path = os.path.join(self.recording_dir.get(), self.recording_filename.get())
-            if os.path.exists(full_path):
-                file_mb = os.path.getsize(full_path) / (1024.0 * 1024.0)
+            if self.active_recording_path.exists():
+                file_mb = self.active_recording_path.stat().st_size / (1024.0 * 1024.0)
             else:
                 file_mb = (self.total_recorded_events * 8.0) / (1024.0 * 1024.0)
 
