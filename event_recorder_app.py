@@ -52,6 +52,9 @@ class EventRecorderApp(tk.Tk):
         self.geometry("1280x768")
         self.minsize(1024, 700)
 
+        # Pre-allocated image buffer for cv2.resize to prevent heap allocation churn
+        self._resized_buf = np.empty((440, 620, 3), dtype=np.uint8)
+
         # Thread safety lock
         self.lock = threading.Lock()
         self.shared_display_frame = None
@@ -77,6 +80,7 @@ class EventRecorderApp(tk.Tk):
 
         # Recording variables
         self.recording_active = False
+        self._prev_recording_active = False
         self.recording_dir = tk.StringVar(value=str(Path.home()))
         self.recording_filename = tk.StringVar(value="event_recording.raw")
         self.record_start_time = 0.0
@@ -577,12 +581,13 @@ class EventRecorderApp(tk.Tk):
 
                 # High-speed vectorized pixel assignment (Zero intermediate memory allocation)
                 if evs.size > 0:
-                    on_mask = evs['p'] == 1
+                    p_arr, y_arr, x_arr = evs['p'], evs['y'], evs['x']
+                    on_mask = (p_arr == 1)
                     off_mask = ~on_mask
 
-                    # Direct array indexing for maximum performance
-                    display_frame[evs['y'][on_mask], evs['x'][on_mask]] = (255, 255, 255)
-                    display_frame[evs['y'][off_mask], evs['x'][off_mask]] = (100, 100, 100)
+                    # Direct array indexing using cached structured array references
+                    display_frame[y_arr[on_mask], x_arr[on_mask]] = (255, 255, 255)
+                    display_frame[y_arr[off_mask], x_arr[off_mask]] = (100, 100, 100)
                     accumulated_events_count += evs.size
 
                 frame_counter += 1
@@ -628,15 +633,15 @@ class EventRecorderApp(tk.Tk):
 
         # Handle live video frame update with zero PNG compression CPU overhead
         if frame is not None:
-            # Resize image cleanly using ultra-fast nearest neighbor interpolation
-            img_resized = cv2.resize(frame, (620, 440), interpolation=cv2.INTER_NEAREST)
+            # Resize image cleanly using ultra-fast nearest neighbor interpolation into pre-allocated buffer
+            cv2.resize(frame, (620, 440), dst=self._resized_buf, interpolation=cv2.INTER_NEAREST)
 
             # Pre-computed cached PPM header (620x440) eliminates string formatting and ASCII encoding overhead on every 20ms frame
             if not hasattr(self, '_ppm_header') or getattr(self, '_ppm_dimensions', None) != (620, 440):
                 self._ppm_dimensions = (620, 440)
                 self._ppm_header = b"P6 620 440 255\n"
 
-            raw_ppm = self._ppm_header + img_resized.tobytes()
+            raw_ppm = self._ppm_header + self._resized_buf.tobytes()
 
             if self.image_label.cget("text"):
                 self.image_label.config(text="")
@@ -675,7 +680,7 @@ class EventRecorderApp(tk.Tk):
 
                     self.canvas.draw_idle()
 
-        # Update recording statistics
+        # Update recording statistics only when active or when transitioning from active to inactive
         if self.recording_active:
             dur = time.time() - self.record_start_time
             full_path = os.path.join(self.recording_dir.get(), self.recording_filename.get())
@@ -688,11 +693,14 @@ class EventRecorderApp(tk.Tk):
             self.stat_file_size.config(text=f"{file_mb:.2f} MB")
             self.stat_tot_events.config(text=f"{self.total_recorded_events:,}")
             self.stat_rate.config(text=f"{int(current_rate):,} Evt/s")
-        else:
+            self._prev_recording_active = True
+        elif self._prev_recording_active:
+            # Reset stat labels once when recording stops to eliminate redundant config() calls every 20ms frame
             self.stat_duration.config(text="0.0 s")
             self.stat_file_size.config(text="0.0 MB")
             self.stat_tot_events.config(text="0")
             self.stat_rate.config(text="0 Evt/s")
+            self._prev_recording_active = False
 
         # Re-trigger loop every 20ms
         self.after(20, self.update_loop)
