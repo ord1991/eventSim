@@ -84,8 +84,15 @@ class EventRecorderApp(tk.Tk):
         self.last_graph_update_time = 0.0  # Decoupled graph plotting rate limiter
 
         # GUI Controlled parameters & Visualization settings
-        self.accumulation_time_ms = tk.DoubleVar(value=30.0) # default 30ms accumulation
-        self.accumulation_ms_val = 30.0  # Thread-safe float copy of accumulation_time_ms
+        # 1. Video Accumulation Time (1.0 to 500.0 ms)
+        self.video_accumulation_time_ms = tk.DoubleVar(value=30.0)
+        self.video_accumulation_ms_val = 30.0  # Thread-safe float copy (ms)
+
+        # 2. Graph Accumulation Time (0.1 to 100,000.0 µs, logarithmic scale slider)
+        self.graph_accumulation_time_us = tk.DoubleVar(value=10000.0)  # 10,000 µs (10 ms)
+        self.graph_accumulation_log_var = tk.DoubleVar(value=np.log10(10000.0))  # log10(10000) = 4.0
+        self.graph_accumulation_entry_var = tk.StringVar(value="10000.0")
+        self.graph_accumulation_us_val = 10000.0  # Thread-safe float copy (µs)
         self.viz_mode = tk.StringVar(value="Accumulation") # "Accumulation" vs "Time-Surface Decay"
         self.color_palette = tk.StringVar(value="Monochrome") # "Monochrome", "Red/Blue", "Green/Red", "Heatmap"
         self.roi_active = False
@@ -232,6 +239,26 @@ class EventRecorderApp(tk.Tk):
         self.image_label.bind("<B1-Motion>", self.on_roi_drag)
         self.image_label.bind("<ButtonRelease-1>", self.on_roi_end)
 
+        # Video Accumulation Slider Area (underneath video stream, left side)
+        video_acc_frame = ttk.Frame(col1, style="Panel.TFrame")
+        video_acc_frame.pack(fill="x", side="bottom", padx=15, pady=10)
+
+        video_slider_lbl = ttk.Label(video_acc_frame, text="Video Accumulation Time (ms):", style="PanelSec.TLabel")
+        video_slider_lbl.pack(side="left", padx=5)
+
+        self.video_acc_val_lbl = ttk.Label(video_acc_frame, text="30.0 ms", style="PanelSec.TLabel", font=("Calibri", 12, "bold"), foreground="#30d158")
+        self.video_acc_val_lbl.pack(side="right", padx=5)
+
+        video_acc_slider = ttk.Scale(
+            video_acc_frame,
+            from_=1.0,
+            to=500.0,
+            variable=self.video_accumulation_time_ms,
+            orient="horizontal",
+            command=self.on_video_accumulation_slider_moved
+        )
+        video_acc_slider.pack(fill="x", expand=True, side="left", padx=10)
+
         # Column 2: Event Rate plot + Accumulation Slider (Middle)
         col2 = ttk.Frame(main_container, style="Panel.TFrame", width=380, height=600)
         col2.pack(side="left", fill="both", expand=True, padx=5)
@@ -261,25 +288,34 @@ class EventRecorderApp(tk.Tk):
         # Build active subplot layout
         self.refresh_graph_layout()
 
-        # Accumulation Time Slider Area directly underneath the chart
+        # Graph Accumulation Time Slider & Entry Area directly underneath the chart
         acc_control_frame = ttk.Frame(parent, style="Panel.TFrame")
         acc_control_frame.pack(fill="x", side="bottom", padx=15, pady=15)
 
-        slider_label = ttk.Label(acc_control_frame, text="Accumulation Time (ms):", style="PanelSec.TLabel")
+        slider_label = ttk.Label(acc_control_frame, text="Graph Acc. (µs):", style="PanelSec.TLabel")
         slider_label.pack(side="left", padx=5)
 
-        self.acc_slider_val_lbl = ttk.Label(acc_control_frame, text="30.0 ms", style="PanelSec.TLabel", font=("Calibri", 12, "bold"), foreground="#30d158")
-        self.acc_slider_val_lbl.pack(side="right", padx=5)
-
-        acc_slider = ttk.Scale(
+        # Logarithmic slider from log10(0.1) = -1.0 to log10(100,000) = 5.0
+        graph_acc_slider = ttk.Scale(
             acc_control_frame,
-            from_=1.0,
-            to=100.0,
-            variable=self.accumulation_time_ms,
+            from_=-1.0,
+            to=5.0,
+            variable=self.graph_accumulation_log_var,
             orient="horizontal",
-            command=self.on_accumulation_slider_moved
+            command=self.on_graph_accumulation_slider_moved
         )
-        acc_slider.pack(fill="x", expand=True, side="left", padx=10)
+        graph_acc_slider.pack(fill="x", expand=True, side="left", padx=5)
+
+        # Entry text box connected to graph accumulation time (µs)
+        self.graph_acc_entry = ttk.Entry(acc_control_frame, textvariable=self.graph_accumulation_entry_var, width=10, justify="center")
+        self.graph_acc_entry.pack(side="right", padx=5)
+
+        unit_lbl = ttk.Label(acc_control_frame, text="µs", style="PanelSec.TLabel", font=("Calibri", 10, "bold"), foreground="#30d158")
+        unit_lbl.pack(side="right", padx=2)
+
+        # Bind Enter key and focus out to validate and sync text entry value
+        self.graph_acc_entry.bind("<Return>", self.on_graph_accumulation_entry_submitted)
+        self.graph_acc_entry.bind("<FocusOut>", self.on_graph_accumulation_entry_submitted)
 
     def refresh_graph_layout(self):
         """Dynamically configures active Matplotlib subplots based on enabled checkbuttons."""
@@ -366,10 +402,60 @@ class EventRecorderApp(tk.Tk):
                 self.clear_roi()
         self.drag_start = None
 
-    def on_accumulation_slider_moved(self, val):
+    def on_video_accumulation_slider_moved(self, val):
         val_float = float(val)
-        self.acc_slider_val_lbl.config(text=f"{val_float:.1f} ms")
-        self.accumulation_ms_val = val_float
+        self.video_acc_val_lbl.config(text=f"{val_float:.1f} ms")
+        self.video_accumulation_ms_val = val_float
+
+    def on_graph_accumulation_slider_moved(self, log_val):
+        """Called when logarithmic graph accumulation slider moves."""
+        log_float = float(log_val)
+        us_val = 10.0 ** log_float
+        us_val = max(0.1, min(100000.0, us_val))
+
+        self.graph_accumulation_time_us.set(us_val)
+        self.graph_accumulation_us_val = us_val
+
+        # Format string representation for entry text box
+        if us_val < 1.0:
+            formatted_text = f"{us_val:.2f}"
+        elif us_val < 100.0:
+            formatted_text = f"{us_val:.1f}"
+        else:
+            formatted_text = f"{us_val:.0f}"
+
+        self.graph_accumulation_entry_var.set(formatted_text)
+
+    def on_graph_accumulation_entry_submitted(self, event=None):
+        """Validates entry text box value upon Enter or FocusOut and syncs slider."""
+        try:
+            raw_text = self.graph_accumulation_entry_var.get().strip()
+            val_float = float(raw_text)
+            clamped_val = max(0.1, min(100000.0, val_float))
+
+            self.graph_accumulation_time_us.set(clamped_val)
+            self.graph_accumulation_us_val = clamped_val
+            self.graph_accumulation_log_var.set(np.log10(clamped_val))
+
+            # Format entry text
+            if clamped_val < 1.0:
+                formatted_text = f"{clamped_val:.2f}"
+            elif clamped_val < 100.0:
+                formatted_text = f"{clamped_val:.1f}"
+            else:
+                formatted_text = f"{clamped_val:.0f}"
+
+            self.graph_accumulation_entry_var.set(formatted_text)
+        except ValueError:
+            # Revert to last valid value if user typed invalid characters
+            current_us = self.graph_accumulation_us_val
+            if current_us < 1.0:
+                formatted_text = f"{current_us:.2f}"
+            elif current_us < 100.0:
+                formatted_text = f"{current_us:.1f}"
+            else:
+                formatted_text = f"{current_us:.0f}"
+            self.graph_accumulation_entry_var.set(formatted_text)
 
     def build_control_panel(self, parent):
         """Right sidebar containing Biases parameters, ERC, and Trail Filter controls."""
@@ -779,9 +865,14 @@ class EventRecorderApp(tk.Tk):
             height, width = iterator.get_size()
             display_frame = np.zeros((height, width, 3), dtype=np.uint8)
 
-            frame_counter = 0
-            accumulated_events_count = 0
-            last_calc_time = time.time()
+            video_slice_counter = 0
+
+            graph_events_cnt = 0
+            graph_on_cnt = 0
+            graph_off_cnt = 0
+            graph_spatial_x = np.zeros(width, dtype=np.int32)
+            graph_slice_counter = 0
+            last_graph_calc_time = time.time()
 
             for evs in iterator:
                 if not self.replay_active:
@@ -795,6 +886,12 @@ class EventRecorderApp(tk.Tk):
                     on_mask = (p_arr == 1)
                     off_mask = ~on_mask
 
+                    on_cnt = np.count_nonzero(on_mask)
+                    graph_on_cnt += on_cnt
+                    graph_off_cnt += (p_arr.size - on_cnt)
+                    graph_spatial_x += np.bincount(x_arr, minlength=width)
+                    graph_events_cnt += evs.size
+
                     palette = self.color_palette.get()
                     if palette == "Red/Blue":
                         on_color, off_color = (255, 50, 50), (50, 50, 255)
@@ -807,31 +904,45 @@ class EventRecorderApp(tk.Tk):
 
                     display_frame[y_arr[on_mask], x_arr[on_mask]] = on_color
                     display_frame[y_arr[off_mask], x_arr[off_mask]] = off_color
-                    accumulated_events_count += evs.size
 
-                frame_counter += 1
-                frames_to_accumulate = max(1, int(self.accumulation_ms_val))
+                video_slice_counter += 1
+                graph_slice_counter += 1
 
-                if frame_counter >= frames_to_accumulate:
+                # Check graph accumulation window (in µs)
+                target_graph_slices = max(1, int(round(self.graph_accumulation_us_val / 1000.0)))
+                if graph_slice_counter >= target_graph_slices:
                     now = time.time()
-                    dt = now - last_calc_time
+                    dt = now - last_graph_calc_time
                     if dt <= 0:
-                        dt = 0.001
+                        dt = max(0.000001, self.graph_accumulation_us_val / 1e6)
 
-                    evt_rate = accumulated_events_count / dt
+                    evt_rate = graph_events_cnt / dt
 
                     with self.lock:
-                        self.shared_display_frame = display_frame.copy()
                         self.event_rate_live = evt_rate
+                        self.on_count_live = graph_on_cnt
+                        self.off_count_live = graph_off_cnt
+                        self.last_spatial_x = graph_spatial_x.copy()
+
+                    graph_events_cnt = 0
+                    graph_on_cnt = 0
+                    graph_off_cnt = 0
+                    graph_spatial_x.fill(0)
+                    graph_slice_counter = 0
+                    last_graph_calc_time = now
+
+                # Check video accumulation window (in ms)
+                video_frames_to_accumulate = max(1, int(round(self.video_accumulation_ms_val)))
+                if video_slice_counter >= video_frames_to_accumulate:
+                    with self.lock:
+                        self.shared_display_frame = display_frame.copy()
 
                     display_frame.fill(0)
-                    frame_counter = 0
-                    accumulated_events_count = 0
-                    last_calc_time = now
+                    video_slice_counter = 0
 
                     # Sleep according to speed multiplier
                     speed = max(0.1, self.replay_speed.get())
-                    time.sleep(max(0.001, (self.accumulation_ms_val / 1000.0) / speed))
+                    time.sleep(max(0.001, (self.video_accumulation_ms_val / 1000.0) / speed))
 
         except Exception as e:
             print(f"Error in replay worker thread: {e}")
@@ -954,13 +1065,15 @@ class EventRecorderApp(tk.Tk):
 
         # Pre-allocate display buffer once to avoid reallocating numpy arrays on every accumulation window cycle
         display_frame = np.zeros((height, width, 3), dtype=np.uint8)
-        frame_counter = 0
-        accumulated_events_count = 0
-        last_calc_time = time.time()
 
-        accumulated_on_cnt = 0
-        accumulated_off_cnt = 0
-        accumulated_spatial_x = np.zeros(width, dtype=np.int32)
+        video_slice_counter = 0
+
+        graph_events_cnt = 0
+        graph_on_cnt = 0
+        graph_off_cnt = 0
+        graph_spatial_x = np.zeros(width, dtype=np.int32)
+        graph_slice_counter = 0
+        last_graph_calc_time = time.time()
 
         try:
             for evs in self.slicer_instance:
@@ -984,9 +1097,10 @@ class EventRecorderApp(tk.Tk):
                         off_mask = ~on_mask
 
                         on_cnt = np.count_nonzero(on_mask)
-                        accumulated_on_cnt += on_cnt
-                        accumulated_off_cnt += (p_arr.size - on_cnt)
-                        accumulated_spatial_x += np.bincount(x_arr, minlength=width)
+                        graph_on_cnt += on_cnt
+                        graph_off_cnt += (p_arr.size - on_cnt)
+                        graph_spatial_x += np.bincount(x_arr, minlength=width)
+                        graph_events_cnt += p_arr.size
 
                         palette = self.color_palette.get()
                         if palette == "Red/Blue":
@@ -1008,43 +1122,45 @@ class EventRecorderApp(tk.Tk):
                         # Direct array indexing using cached structured array references
                         display_frame[y_arr[on_mask], x_arr[on_mask]] = on_color
                         display_frame[y_arr[off_mask], x_arr[off_mask]] = off_color
-                        accumulated_events_count += p_arr.size
 
-                frame_counter += 1
+                video_slice_counter += 1
+                graph_slice_counter += 1
 
-                # Read dynamically from thread-safe variable (converted to integer ms)
-                frames_to_accumulate = max(1, int(self.accumulation_ms_val))
-
-                if frame_counter >= frames_to_accumulate:
+                # 1. Process Graph accumulation window (in µs)
+                target_graph_slices = max(1, int(round(self.graph_accumulation_us_val / 1000.0)))
+                if graph_slice_counter >= target_graph_slices:
                     now = time.time()
-                    dt = now - last_calc_time
+                    dt = now - last_graph_calc_time
                     if dt <= 0:
-                        dt = 0.001
+                        dt = max(0.000001, self.graph_accumulation_us_val / 1e6)
 
-                    # Calculate event rate (events/sec) for this accumulated interval
-                    evt_rate = accumulated_events_count / dt
+                    evt_rate = graph_events_cnt / dt
 
-                    # Thread-safe dispatch frame and stats to UI loop
+                    with self.lock:
+                        self.event_rate_live = evt_rate
+                        self.on_count_live = graph_on_cnt
+                        self.off_count_live = graph_off_cnt
+                        self.last_spatial_x = graph_spatial_x.copy()
+                        if self.recording_active:
+                            self.total_recorded_events += graph_events_cnt
+
+                    graph_events_cnt = 0
+                    graph_on_cnt = 0
+                    graph_off_cnt = 0
+                    graph_spatial_x.fill(0)
+                    graph_slice_counter = 0
+                    last_graph_calc_time = now
+
+                # 2. Process Video accumulation window (in ms)
+                video_frames_to_accumulate = max(1, int(round(self.video_accumulation_ms_val)))
+                if video_slice_counter >= video_frames_to_accumulate:
                     with self.lock:
                         self.shared_display_frame = display_frame.copy()
-                        self.event_rate_live = evt_rate
-                        self.on_count_live = accumulated_on_cnt
-                        self.off_count_live = accumulated_off_cnt
-                        self.last_spatial_x = accumulated_spatial_x.copy()
-                        if self.recording_active:
-                            self.total_recorded_events += accumulated_events_count
 
-                    # Clear existing pre-allocated canvas if not in decay mode
                     if self.viz_mode.get() != "Time-Surface Decay":
                         display_frame.fill(0)
 
-                    accumulated_on_cnt = 0
-                    accumulated_off_cnt = 0
-                    accumulated_spatial_x.fill(0)
-
-                    frame_counter = 0
-                    accumulated_events_count = 0
-                    last_calc_time = now
+                    video_slice_counter = 0
 
         except Exception as e:
             print(f"Exception in Metavision SDK thread: {e}")
