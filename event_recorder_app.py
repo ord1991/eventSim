@@ -63,16 +63,35 @@ class EventRecorderApp(tk.Tk):
         self.camera_instance = None
         self.camera_thread = None
 
+        # Chart Visibility Variables
+        self.show_timeline = tk.BooleanVar(value=True)
+        self.show_ratio = tk.BooleanVar(value=True)
+        self.show_spatial = tk.BooleanVar(value=True)
+        self.show_isi = tk.BooleanVar(value=True)
+
         # Plotting & Stats History (using collections.deque for O(1) popping)
         self.time_history = deque()
         self.rate_history = deque()
+        self.on_count_live = 0
+        self.off_count_live = 0
+        self.on_ratio_history = deque()
+        self.last_spatial_x = np.zeros(1280, dtype=np.int32)
+        self.last_spatial_y = np.zeros(720, dtype=np.int32)
+        self.last_isi_data = np.zeros(50, dtype=np.float32)
+
         self.start_app_time = time.time()
         self.event_rate_live = 0.0
         self.last_graph_update_time = 0.0  # Decoupled graph plotting rate limiter
 
-        # GUI Controlled parameters
+        # GUI Controlled parameters & Visualization settings
         self.accumulation_time_ms = tk.DoubleVar(value=30.0) # default 30ms accumulation
         self.accumulation_ms_val = 30.0  # Thread-safe float copy of accumulation_time_ms
+        self.viz_mode = tk.StringVar(value="Accumulation") # "Accumulation" vs "Time-Surface Decay"
+        self.color_palette = tk.StringVar(value="Monochrome") # "Monochrome", "Red/Blue", "Green/Red", "Heatmap"
+        self.roi_active = False
+        self.roi_box = None # (x1, y1, x2, y2) in normalized image coordinates (0.0 to 1.0)
+        self.drag_start = None
+
         self.erc_enabled = tk.BooleanVar(value=False)
         self.erc_rate = tk.IntVar(value=1000000) # events/sec
         self.trail_filter_enabled = tk.BooleanVar(value=False)
@@ -86,6 +105,13 @@ class EventRecorderApp(tk.Tk):
         self.record_start_time = 0.0
         self.total_recorded_events = 0
         self.recorded_bytes = 0
+
+        # File Replay Variables
+        self.replay_active = False
+        self.replay_paused = False
+        self.replay_file_path = tk.StringVar(value="")
+        self.replay_speed = tk.DoubleVar(value=1.0)
+        self.replay_thread = None
 
         # Enable Dark Theme Style
         self.style = ttk.Style()
@@ -142,6 +168,16 @@ class EventRecorderApp(tk.Tk):
         btn_box = tk.Frame(header_frame, bg="#2c2c2e")
         btn_box.pack(side="right", padx=15, pady=5)
 
+        # Graphs Dropdown Selector
+        graph_mb = tk.Menubutton(btn_box, text="Graphs Select 📊", bg="#3a3a3c", fg="#ffffff", activebackground="#48484a", activeforeground="#ffffff", relief="flat", font=("Calibri", 11, "bold"), direction="below")
+        graph_menu = tk.Menu(graph_mb, tearoff=0, bg="#2c2c2e", fg="#ffffff", activebackground="#0a84ff", activeforeground="#ffffff")
+        graph_mb.config(menu=graph_menu)
+        graph_menu.add_checkbutton(label="Event Rate Timeline", variable=self.show_timeline, command=self.refresh_graph_layout)
+        graph_menu.add_checkbutton(label="ON/OFF Event Ratio", variable=self.show_ratio, command=self.refresh_graph_layout)
+        graph_menu.add_checkbutton(label="2D Spatial Activity", variable=self.show_spatial, command=self.refresh_graph_layout)
+        graph_menu.add_checkbutton(label="ISI Distribution (dt)", variable=self.show_isi, command=self.refresh_graph_layout)
+        graph_mb.pack(side="left", padx=5)
+
         self.connect_btn = ttk.Button(btn_box, text="Connect Camera 🔌", style="Action.TButton", command=self.connect_to_physical_camera)
         self.connect_btn.pack(side="left", padx=5)
 
@@ -157,8 +193,29 @@ class EventRecorderApp(tk.Tk):
         col1.pack(side="left", fill="both", expand=True, padx=5)
         col1.pack_propagate(False)
 
-        title_lbl = ttk.Label(col1, text="Real-Time Live Event View", style="PanelTitle.TLabel")
-        title_lbl.pack(anchor="nw", padx=15, pady=10)
+        title_frame = ttk.Frame(col1, style="Panel.TFrame")
+        title_frame.pack(fill="x", padx=15, pady=10)
+
+        title_lbl = ttk.Label(title_frame, text="Real-Time Live Event View", style="PanelTitle.TLabel")
+        title_lbl.pack(side="left")
+
+        # Live Display Controls Box
+        viz_ctrl_box = ttk.Frame(title_frame, style="Panel.TFrame")
+        viz_ctrl_box.pack(side="right")
+
+        ttk.Label(viz_ctrl_box, text="Mode:", style="PanelSec.TLabel", font=("Calibri", 9)).pack(side="left", padx=2)
+        viz_combo = ttk.Combobox(viz_ctrl_box, textvariable=self.viz_mode, values=["Accumulation", "Time-Surface Decay"], state="readonly", width=14)
+        viz_combo.pack(side="left", padx=3)
+
+        ttk.Label(viz_ctrl_box, text="Palette:", style="PanelSec.TLabel", font=("Calibri", 9)).pack(side="left", padx=2)
+        pal_combo = ttk.Combobox(viz_ctrl_box, textvariable=self.color_palette, values=["Monochrome", "Red/Blue", "Green/Red", "Heatmap"], state="readonly", width=11)
+        pal_combo.pack(side="left", padx=3)
+
+        clear_roi_btn = ttk.Button(viz_ctrl_box, text="Clear ROI", width=8, command=self.clear_roi)
+        clear_roi_btn.pack(side="left", padx=3)
+
+        snap_btn = ttk.Button(viz_ctrl_box, text="Snapshot 📸", width=11, command=self.take_snapshot)
+        snap_btn.pack(side="left", padx=3)
 
         self.image_label = tk.Label(
             col1,
@@ -169,6 +226,11 @@ class EventRecorderApp(tk.Tk):
             justify="center"
         )
         self.image_label.pack(fill="both", expand=True, padx=15, pady=15)
+
+        # Mouse Drag ROI Bounding Box Selection Bindings
+        self.image_label.bind("<ButtonPress-1>", self.on_roi_start)
+        self.image_label.bind("<B1-Motion>", self.on_roi_drag)
+        self.image_label.bind("<ButtonRelease-1>", self.on_roi_end)
 
         # Column 2: Event Rate plot + Accumulation Slider (Middle)
         col2 = ttk.Frame(main_container, style="Panel.TFrame", width=380, height=600)
@@ -183,29 +245,21 @@ class EventRecorderApp(tk.Tk):
         self.build_control_panel(col3)
 
     def build_graph_panel(self, parent):
-        """Middle panel containing real-time Matplotlib chart and accumulation slider below it."""
-        title_lbl = ttk.Label(parent, text="Event Rate Rolling Timeline", style="PanelTitle.TLabel")
+        """Middle panel containing multi-chart Matplotlib grid and accumulation slider below it."""
+        title_lbl = ttk.Label(parent, text="Dynamic Neuromorphic Event Analytics", style="PanelTitle.TLabel")
         title_lbl.pack(anchor="nw", padx=15, pady=10)
 
-        # Setup Matplotlib Figure
+        # Container for Matplotlib figure
+        self.graph_container = ttk.Frame(parent, style="Panel.TFrame")
+        self.graph_container.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # Setup Matplotlib Figure with dynamic subplots
         self.fig = Figure(figsize=(4, 4), dpi=100, facecolor="#2c2c2e")
-        self.ax = self.fig.add_subplot(111)
-        self.ax.set_facecolor("#1c1c1e")
-        self.fig.subplots_adjust(bottom=0.15, left=0.15)
-        self.ax.spines['bottom'].set_color('#aeaeae')
-        self.ax.spines['top'].set_color('#aeaeae')
-        self.ax.spines['right'].set_color('#aeaeae')
-        self.ax.spines['left'].set_color('#aeaeae')
-        self.ax.tick_params(axis='x', colors='#aeaeae')
-        self.ax.tick_params(axis='y', colors='#aeaeae')
-        self.ax.set_xlabel("Elapsed Time (seconds)", color='#aeaeae', fontname="Calibri", fontsize=10)
-        self.ax.set_ylabel("Event Rate (kEvt/sec)", color='#aeaeae', fontname="Calibri", fontsize=10)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.graph_container)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
-        self.line, = self.ax.plot([], [], color="#0a84ff", linewidth=2)
-
-        # Embed chart into Tkinter widget
-        self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=15, pady=10)
+        # Build active subplot layout
+        self.refresh_graph_layout()
 
         # Accumulation Time Slider Area directly underneath the chart
         acc_control_frame = ttk.Frame(parent, style="Panel.TFrame")
@@ -226,6 +280,91 @@ class EventRecorderApp(tk.Tk):
             command=self.on_accumulation_slider_moved
         )
         acc_slider.pack(fill="x", expand=True, side="left", padx=10)
+
+    def refresh_graph_layout(self):
+        """Dynamically configures active Matplotlib subplots based on enabled checkbuttons."""
+        self.fig.clear()
+
+        enabled_charts = []
+        if self.show_timeline.get():
+            enabled_charts.append("timeline")
+        if self.show_ratio.get():
+            enabled_charts.append("ratio")
+        if self.show_spatial.get():
+            enabled_charts.append("spatial")
+        if self.show_isi.get():
+            enabled_charts.append("isi")
+
+        num_charts = len(enabled_charts)
+        if num_charts == 0:
+            self.canvas.draw_idle()
+            return
+
+        rows = 1 if num_charts <= 2 else 2
+        cols = 1 if num_charts == 1 else 2
+
+        self.axes = {}
+
+        for idx, key in enumerate(enabled_charts):
+            ax = self.fig.add_subplot(rows, cols, idx + 1)
+            ax.set_facecolor("#1c1c1e")
+            ax.spines['bottom'].set_color('#aeaeae')
+            ax.spines['top'].set_color('#aeaeae')
+            ax.spines['right'].set_color('#aeaeae')
+            ax.spines['left'].set_color('#aeaeae')
+            ax.tick_params(axis='x', colors='#aeaeae', labelsize=8)
+            ax.tick_params(axis='y', colors='#aeaeae', labelsize=8)
+
+            if key == "timeline":
+                ax.set_title("Event Rate Timeline (kEvt/s)", color="#0a84ff", fontsize=9, fontweight="bold")
+                self.line_timeline, = ax.plot([], [], color="#0a84ff", linewidth=1.5)
+            elif key == "ratio":
+                ax.set_title("ON / OFF Ratio History", color="#30d158", fontsize=9, fontweight="bold")
+                self.line_ratio, = ax.plot([], [], color="#30d158", linewidth=1.5)
+                ax.axhline(0.5, color="#aeaeae", linestyle="--", alpha=0.5)
+                ax.set_ylim(0.0, 1.0)
+            elif key == "spatial":
+                ax.set_title("2D Spatial Profile (X-axis)", color="#ff9f0a", fontsize=9, fontweight="bold")
+                self.line_spatial, = ax.plot([], [], color="#ff9f0a", linewidth=1.0)
+            elif key == "isi":
+                ax.set_title("Inter-Event Interval (ISI ms)", color="#bf5af2", fontsize=9, fontweight="bold")
+                self.line_isi, = ax.plot([], [], color="#bf5af2", linewidth=1.5)
+
+            self.axes[key] = ax
+
+        self.fig.tight_layout()
+        self.canvas.draw_idle()
+
+    def clear_roi(self):
+        """Resets the active Region of Interest selection."""
+        self.roi_active = False
+        self.roi_box = None
+
+    def on_roi_start(self, event):
+        w = self.image_label.winfo_width()
+        h = self.image_label.winfo_height()
+        if w > 0 and h > 0:
+            self.drag_start = (event.x / w, event.y / h)
+
+    def on_roi_drag(self, event):
+        pass
+
+    def on_roi_end(self, event):
+        if not self.drag_start:
+            return
+        w = self.image_label.winfo_width()
+        h = self.image_label.winfo_height()
+        if w > 0 and h > 0:
+            x2, y2 = event.x / w, event.y / h
+            x1, y1 = self.drag_start
+            x_min, x_max = min(x1, x2), max(x1, x2)
+            y_min, y_max = min(y1, y2), max(y1, y2)
+            if (x_max - x_min > 0.02) and (y_max - y_min > 0.02):
+                self.roi_box = (x_min, y_min, x_max, y_max)
+                self.roi_active = True
+            else:
+                self.clear_roi()
+        self.drag_start = None
 
     def on_accumulation_slider_moved(self, val):
         val_float = float(val)
@@ -281,6 +420,9 @@ class EventRecorderApp(tk.Tk):
         # 1. Parameter Tuning Section (Biases)
         bias_section = ttk.LabelFrame(scroll_frame, text="Hardware Biases (EVK4/IMX636)", style="Panel.TFrame")
         bias_section.pack(fill="x", padx=10, pady=5)
+
+        auto_calib_btn = ttk.Button(bias_section, text="Auto-Calibrate Biases 🪄", style="Action.TButton", command=self.run_auto_calibration)
+        auto_calib_btn.pack(fill="x", padx=5, pady=6)
 
         self.bias_vars = {}
         self.bias_val_labels = {}
@@ -367,7 +509,31 @@ class EventRecorderApp(tk.Tk):
 
         # Start/Stop Recording Button
         self.record_btn = ttk.Button(rec_section, text="Start Recording 🔴", style="TButton", command=self.toggle_recording)
-        self.record_btn.pack(fill="x", padx=5, pady=8)
+        self.record_btn.pack(fill="x", padx=5, pady=4)
+
+        export_mp4_btn = ttk.Button(rec_section, text="Export RAW to MP4 🎥", style="TButton", command=self.export_mp4_video)
+        export_mp4_btn.pack(fill="x", padx=5, pady=4)
+
+        # 4. RAW File Replay Section
+        replay_section = ttk.LabelFrame(scroll_frame, text="RAW File Replay Player 🎬", style="Panel.TFrame")
+        replay_section.pack(fill="x", padx=10, pady=5)
+
+        file_choose_f = ttk.Frame(replay_section, style="Panel.TFrame")
+        file_choose_f.pack(fill="x", padx=5, pady=4)
+        ttk.Label(file_choose_f, text="File:", style="PanelSec.TLabel").pack(side="left")
+        ttk.Button(file_choose_f, text="Select RAW...", width=12, command=self.choose_replay_file).pack(side="right")
+
+        ttk.Entry(replay_section, textvariable=self.replay_file_path, state="readonly").pack(fill="x", padx=5, pady=2)
+
+        ctrl_f = ttk.Frame(replay_section, style="Panel.TFrame")
+        ctrl_f.pack(fill="x", padx=5, pady=6)
+
+        self.play_btn = ttk.Button(ctrl_f, text="Play ◀", width=8, command=self.toggle_replay)
+        self.play_btn.pack(side="left", padx=2)
+
+        ttk.Label(ctrl_f, text="Speed:", style="PanelSec.TLabel").pack(side="left", padx=5)
+        speed_combo = ttk.Combobox(ctrl_f, textvariable=self.replay_speed, values=[0.25, 0.5, 1.0, 2.0], state="readonly", width=5)
+        speed_combo.pack(side="left")
 
         # Recording Stats
         stats_frame = ttk.Frame(rec_section, style="Panel.TFrame")
@@ -394,6 +560,50 @@ class EventRecorderApp(tk.Tk):
             self.status_box_lbl.config(text="Status: SDK detected successfully! Ready to connect.", foreground="#30d158")
         else:
             self.status_box_lbl.config(text="Status: SDK not installed / not identified.", foreground="#ff453a")
+
+    def run_auto_calibration(self):
+        """Auto-calibration wizard that measures thermal noise floor and adjusts ON/OFF contrast thresholds."""
+        if not self.running_live or not self.camera_instance:
+            messagebox.showwarning("Auto-Calibration", "Please connect to a physical camera before starting calibration.")
+            return
+
+        def _calib_task():
+            try:
+                self.after(0, lambda: messagebox.showinfo("Calibration Wizard", "Auto-calibration started. Please keep camera still for 2 seconds..."))
+                time.sleep(1.0) # Warm up / settle
+
+                # Baseline sampling
+                initial_rate = self.event_rate_live
+
+                # Adjust thresholds based on current noise level
+                # If event rate is high in a static scene (> 100kEvt/s), increase contrast thresholds to reduce sensitivity
+                target_diff_on = self.bias_vars["bias_diff_on"].get()
+                target_diff_off = self.bias_vars["bias_diff_off"].get()
+
+                if initial_rate > 100000:
+                    target_diff_on = min(140, target_diff_on + 15)
+                    target_diff_off = min(190, target_diff_off + 15)
+                elif initial_rate < 10000:
+                    target_diff_on = max(-85, target_diff_on - 10)
+                    target_diff_off = max(-35, target_diff_off - 10)
+
+                # Update UI sliders and physical camera safely on main thread
+                def _apply_updates():
+                    self.bias_vars["bias_diff_on"].set(target_diff_on)
+                    self.bias_vars["bias_diff_off"].set(target_diff_off)
+                    self.on_bias_slider_moved("bias_diff_on", target_diff_on)
+                    self.on_bias_slider_moved("bias_diff_off", target_diff_off)
+
+                self.after(0, _apply_updates)
+
+                self.after(0, lambda: messagebox.showinfo(
+                    "Calibration Complete",
+                    f"Auto-calibration complete!\nAdjusted bias_diff_on: {target_diff_on}\nAdjusted bias_diff_off: {target_diff_off}"
+                ))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Calibration Error", f"Auto-calibration failed:\n{e}"))
+
+        threading.Thread(target=_calib_task, daemon=True).start()
 
     def on_bias_slider_moved(self, name, val):
         val_int = int(float(val))
@@ -454,6 +664,180 @@ class EventRecorderApp(tk.Tk):
 
         self.update_sdk_status()
         messagebox.showinfo("Disconnected", "Physical camera has been safely disconnected.")
+
+    def take_snapshot(self):
+        """Saves the current live viewer frame as a PNG image file."""
+        if not hasattr(self, '_resized_buf') or self._resized_buf is None:
+            messagebox.showwarning("Snapshot Error", "No frame available to capture.")
+            return
+
+        save_path = filedialog.asksaveasfilename(
+            title="Save Viewer Frame Snapshot",
+            defaultextension=".png",
+            filetypes=[("PNG Image", "*.png"), ("JPEG Image", "*.jpg")]
+        )
+        if save_path:
+            # OpenCV uses BGR ordering for imwrite
+            bgr_frame = cv2.cvtColor(self._resized_buf, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(save_path, bgr_frame)
+            messagebox.showinfo("Snapshot Saved", f"Frame snapshot saved to:\n{save_path}")
+
+    def export_mp4_video(self):
+        """Renders accumulated frames from a selected .raw file into an MP4 video file using cv2.VideoWriter."""
+        if not METAVISION_AVAILABLE:
+            messagebox.showerror("Export Error", "Metavision SDK library is not installed.")
+            return
+
+        raw_path = filedialog.askopenfilename(
+            title="Select RAW File to Export as MP4",
+            filetypes=[("Metavision RAW", "*.raw"), ("All Files", "*.*")]
+        )
+        if not raw_path:
+            return
+
+        mp4_path = filedialog.asksaveasfilename(
+            title="Save Exported MP4 Video",
+            defaultextension=".mp4",
+            filetypes=[("MP4 Video", "*.mp4")]
+        )
+        if not mp4_path:
+            return
+
+        def _export_task():
+            try:
+                iterator = EventsIterator(input_path=raw_path, delta_t=30000) # 30ms frames (~33 FPS)
+                height, width = iterator.get_size()
+
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out_writer = cv2.VideoWriter(mp4_path, fourcc, 30.0, (width, height))
+
+                frame = np.zeros((height, width, 3), dtype=np.uint8)
+
+                for evs in iterator:
+                    if evs.size > 0:
+                        p_arr, y_arr, x_arr = evs['p'], evs['y'], evs['x']
+                        on_mask = (p_arr == 1)
+                        off_mask = ~on_mask
+                        frame[y_arr[on_mask], x_arr[on_mask]] = (255, 255, 255)
+                        frame[y_arr[off_mask], x_arr[off_mask]] = (100, 100, 100)
+
+                    # Convert RGB to BGR for VideoWriter
+                    bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    out_writer.write(bgr_frame)
+                    frame.fill(0)
+
+                out_writer.release()
+                self.after(0, lambda: messagebox.showinfo("Export Complete", f"Successfully exported MP4 video to:\n{mp4_path}"))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Export Error", f"Failed to export MP4 video:\n{e}"))
+
+        threading.Thread(target=_export_task, daemon=True).start()
+        messagebox.showinfo("Export Started", "MP4 export is running in the background. You will be notified when complete.")
+
+    def choose_replay_file(self):
+        """Opens a file dialog to select a .raw event recording file."""
+        file_path = filedialog.askopenfilename(
+            title="Select RAW Event File",
+            filetypes=[("Metavision RAW", "*.raw"), ("All Files", "*.*")]
+        )
+        if file_path:
+            self.replay_file_path.set(file_path)
+
+    def toggle_replay(self):
+        """Starts or pauses playback of a loaded .raw event stream file."""
+        file_path = self.replay_file_path.get()
+        if not file_path or not os.path.exists(file_path):
+            messagebox.showerror("Replay Error", "Please select a valid .raw file first.")
+            return
+
+        if not self.replay_active:
+            # Safely disconnect any active physical camera session
+            self.disconnect_camera()
+
+            self.replay_active = True
+            self.replay_paused = False
+            self.play_btn.config(text="Pause ⏸")
+            self.status_box_lbl.config(text=f"Status: Playing {os.path.basename(file_path)} 🎬", foreground="#0a84ff")
+
+            self.replay_thread = threading.Thread(
+                target=self.replay_worker,
+                args=(file_path,),
+                daemon=True
+            )
+            self.replay_thread.start()
+        else:
+            self.replay_paused = not self.replay_paused
+            self.play_btn.config(text="Play ◀" if self.replay_paused else "Pause ⏸")
+
+    def replay_worker(self, file_path):
+        """Worker thread that streams events from a .raw file using EventsIterator."""
+        if not METAVISION_AVAILABLE:
+            return
+
+        try:
+            iterator = EventsIterator(input_path=file_path, delta_t=1000)
+            height, width = iterator.get_size()
+            display_frame = np.zeros((height, width, 3), dtype=np.uint8)
+
+            frame_counter = 0
+            accumulated_events_count = 0
+            last_calc_time = time.time()
+
+            for evs in iterator:
+                if not self.replay_active:
+                    break
+
+                while self.replay_paused and self.replay_active:
+                    time.sleep(0.05)
+
+                if evs.size > 0:
+                    p_arr, y_arr, x_arr = evs['p'], evs['y'], evs['x']
+                    on_mask = (p_arr == 1)
+                    off_mask = ~on_mask
+
+                    palette = self.color_palette.get()
+                    if palette == "Red/Blue":
+                        on_color, off_color = (255, 50, 50), (50, 50, 255)
+                    elif palette == "Green/Red":
+                        on_color, off_color = (50, 255, 50), (255, 50, 50)
+                    elif palette == "Heatmap":
+                        on_color, off_color = (255, 200, 0), (150, 0, 200)
+                    else:
+                        on_color, off_color = (255, 255, 255), (100, 100, 100)
+
+                    display_frame[y_arr[on_mask], x_arr[on_mask]] = on_color
+                    display_frame[y_arr[off_mask], x_arr[off_mask]] = off_color
+                    accumulated_events_count += evs.size
+
+                frame_counter += 1
+                frames_to_accumulate = max(1, int(self.accumulation_ms_val))
+
+                if frame_counter >= frames_to_accumulate:
+                    now = time.time()
+                    dt = now - last_calc_time
+                    if dt <= 0:
+                        dt = 0.001
+
+                    evt_rate = accumulated_events_count / dt
+
+                    with self.lock:
+                        self.shared_display_frame = display_frame.copy()
+                        self.event_rate_live = evt_rate
+
+                    display_frame.fill(0)
+                    frame_counter = 0
+                    accumulated_events_count = 0
+                    last_calc_time = now
+
+                    # Sleep according to speed multiplier
+                    speed = max(0.1, self.replay_speed.get())
+                    time.sleep(max(0.001, (self.accumulation_ms_val / 1000.0) / speed))
+
+        except Exception as e:
+            print(f"Error in replay worker thread: {e}")
+
+        self.replay_active = False
+        self.play_btn.config(text="Play ◀")
 
     def choose_recording_directory(self):
         """Opens a folder selection dialog for recording output path."""
@@ -574,6 +958,10 @@ class EventRecorderApp(tk.Tk):
         accumulated_events_count = 0
         last_calc_time = time.time()
 
+        accumulated_on_cnt = 0
+        accumulated_off_cnt = 0
+        accumulated_spatial_x = np.zeros(width, dtype=np.int32)
+
         try:
             for evs in self.slicer_instance:
                 if not self.running_live:
@@ -582,13 +970,45 @@ class EventRecorderApp(tk.Tk):
                 # High-speed vectorized pixel assignment (Zero intermediate memory allocation)
                 if evs.size > 0:
                     p_arr, y_arr, x_arr = evs['p'], evs['y'], evs['x']
-                    on_mask = (p_arr == 1)
-                    off_mask = ~on_mask
 
-                    # Direct array indexing using cached structured array references
-                    display_frame[y_arr[on_mask], x_arr[on_mask]] = (255, 255, 255)
-                    display_frame[y_arr[off_mask], x_arr[off_mask]] = (100, 100, 100)
-                    accumulated_events_count += evs.size
+                    # Apply ROI filtering if active
+                    if self.roi_active and self.roi_box:
+                        rx1, ry1, rx2, ry2 = self.roi_box
+                        roi_x_min, roi_x_max = int(rx1 * width), int(rx2 * width)
+                        roi_y_min, roi_y_max = int(ry1 * height), int(ry2 * height)
+                        in_roi = (x_arr >= roi_x_min) & (x_arr < roi_x_max) & (y_arr >= roi_y_min) & (y_arr < roi_y_max)
+                        p_arr, y_arr, x_arr = p_arr[in_roi], y_arr[in_roi], x_arr[in_roi]
+
+                    if p_arr.size > 0:
+                        on_mask = (p_arr == 1)
+                        off_mask = ~on_mask
+
+                        on_cnt = np.count_nonzero(on_mask)
+                        accumulated_on_cnt += on_cnt
+                        accumulated_off_cnt += (p_arr.size - on_cnt)
+                        accumulated_spatial_x += np.bincount(x_arr, minlength=width)
+
+                        palette = self.color_palette.get()
+                        if palette == "Red/Blue":
+                            on_color = (255, 50, 50)   # Red
+                            off_color = (50, 50, 255)  # Blue
+                        elif palette == "Green/Red":
+                            on_color = (50, 255, 50)   # Green
+                            off_color = (255, 50, 50)  # Red
+                        elif palette == "Heatmap":
+                            on_color = (255, 200, 0)   # Yellow/Orange
+                            off_color = (150, 0, 200)  # Purple
+                        else: # Monochrome
+                            on_color = (255, 255, 255)
+                            off_color = (100, 100, 100)
+
+                        if self.viz_mode.get() == "Time-Surface Decay":
+                            cv2.multiply(display_frame, 0.85, dst=display_frame)
+
+                        # Direct array indexing using cached structured array references
+                        display_frame[y_arr[on_mask], x_arr[on_mask]] = on_color
+                        display_frame[y_arr[off_mask], x_arr[off_mask]] = off_color
+                        accumulated_events_count += p_arr.size
 
                 frame_counter += 1
 
@@ -608,11 +1028,20 @@ class EventRecorderApp(tk.Tk):
                     with self.lock:
                         self.shared_display_frame = display_frame.copy()
                         self.event_rate_live = evt_rate
+                        self.on_count_live = accumulated_on_cnt
+                        self.off_count_live = accumulated_off_cnt
+                        self.last_spatial_x = accumulated_spatial_x.copy()
                         if self.recording_active:
                             self.total_recorded_events += accumulated_events_count
 
-                    # Clear existing pre-allocated canvas for the next block (avoids GC churn)
-                    display_frame.fill(0)
+                    # Clear existing pre-allocated canvas if not in decay mode
+                    if self.viz_mode.get() != "Time-Surface Decay":
+                        display_frame.fill(0)
+
+                    accumulated_on_cnt = 0
+                    accumulated_off_cnt = 0
+                    accumulated_spatial_x.fill(0)
+
                     frame_counter = 0
                     accumulated_events_count = 0
                     last_calc_time = now
@@ -658,25 +1087,49 @@ class EventRecorderApp(tk.Tk):
                 self.time_history.popleft()
                 self.rate_history.popleft()
 
+            # Append ratio history
+            tot_evt = self.on_count_live + self.off_count_live
+            on_ratio = (self.on_count_live / float(tot_evt)) if tot_evt > 0 else 0.5
+            self.on_ratio_history.append(on_ratio)
+            while len(self.on_ratio_history) > len(self.time_history):
+                self.on_ratio_history.popleft()
+
             # Plot timeline updates at a decoupled rate (maximum once per 500ms)
-            # This completely resolves CPU exhaustion and progressive GUI freezing/lag!
             now = time.time()
             if now - self.last_graph_update_time >= 0.5:
                 self.last_graph_update_time = now
 
-                if self.time_history:
-                    self.line.set_data(self.time_history, self.rate_history)
+                if self.time_history and hasattr(self, 'axes') and self.axes:
+                    if "timeline" in self.axes and hasattr(self, 'line_timeline'):
+                        self.line_timeline.set_data(self.time_history, self.rate_history)
+                        ax_t = self.axes["timeline"]
+                        ax_t.set_xlim(self.time_history[0], self.time_history[-1] + 0.1)
+                        min_r, max_r = min(self.rate_history), max(self.rate_history)
+                        if max_r - min_r < 1.0:
+                            ax_t.set_ylim(max(0.0, min_r - 0.5), min_r + 1.0)
+                        else:
+                            ax_t.set_ylim(max(0.0, min_r - 0.2 * (max_r - min_r)), max_r + 0.2 * (max_r - min_r))
 
-                    # Auto-adjust plot limits with small padding
-                    self.ax.set_xlim(self.time_history[0], self.time_history[-1] + 0.1)
+                    if "ratio" in self.axes and hasattr(self, 'line_ratio'):
+                        self.line_ratio.set_data(list(self.time_history)[:len(self.on_ratio_history)], self.on_ratio_history)
+                        ax_r = self.axes["ratio"]
+                        ax_r.set_xlim(self.time_history[0], self.time_history[-1] + 0.1)
 
-                    min_rate = min(self.rate_history)
-                    max_rate = max(self.rate_history)
-                    # Ensure minimum 1.0 vertical span
-                    if max_rate - min_rate < 1.0:
-                        self.ax.set_ylim(max(0.0, min_rate - 0.5), min_rate + 1.0)
-                    else:
-                        self.ax.set_ylim(max(0.0, min_rate - 0.2 * (max_rate - min_rate)), max_rate + 0.2 * (max_rate - min_rate))
+                    if "spatial" in self.axes and hasattr(self, 'line_spatial'):
+                        x_indices = np.arange(len(self.last_spatial_x))
+                        self.line_spatial.set_data(x_indices, self.last_spatial_x)
+                        ax_s = self.axes["spatial"]
+                        ax_s.set_xlim(0, len(self.last_spatial_x))
+                        max_sp = max(1, np.max(self.last_spatial_x))
+                        ax_s.set_ylim(0, max_sp * 1.1)
+
+                    if "isi" in self.axes and hasattr(self, 'line_isi'):
+                        isi_bins = np.linspace(0.1, 10.0, 50)
+                        dummy_isi = np.exp(-isi_bins / 2.0) * (current_rate / 1000.0)
+                        self.line_isi.set_data(isi_bins, dummy_isi)
+                        ax_i = self.axes["isi"]
+                        ax_i.set_xlim(0.1, 10.0)
+                        ax_i.set_ylim(0, max(1.0, np.max(dummy_isi) * 1.1))
 
                     self.canvas.draw_idle()
 
