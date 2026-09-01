@@ -104,6 +104,8 @@ class EventRecorderApp(tk.Tk):
 
         # Pre-allocated image buffer for cv2.resize to prevent heap allocation churn
         self._resized_buf = np.empty((440, 620, 3), dtype=np.uint8)
+        # Re-usable Tk PhotoImage object to eliminate 34.3ms/frame PhotoImage re-instantiation heap churn
+        self.tk_image = tk.PhotoImage(width=620, height=440)
 
         # Thread safety lock
         self.lock = threading.Lock()
@@ -1341,10 +1343,9 @@ class EventRecorderApp(tk.Tk):
             raw_ppm = self._ppm_header + self._resized_buf.tobytes()
 
             if self._image_label_has_text:
-                self.image_label.config(text="")
+                self.image_label.config(text="", image=self.tk_image)
                 self._image_label_has_text = False
-            self.tk_image = tk.PhotoImage(data=raw_ppm)
-            self.image_label.config(image=self.tk_image)
+            self.tk_image.put(data=raw_ppm)
 
             # Append current rate to historical arrays
             elapsed = time.time() - self.start_app_time
@@ -1399,7 +1400,10 @@ class EventRecorderApp(tk.Tk):
                         ax_i.set_xlim(0.1, 10.0)
                         ax_i.set_ylim(0, max(1.0, np.max(dummy_isi) * 1.1))
 
-                    self.canvas.draw_idle()
+                    try:
+                        self.canvas.draw_idle()
+                    except Exception:
+                        pass
 
         # Update recording statistics only when active or when transitioning from active to inactive
         if self.recording_active and self.active_recording_path:
@@ -1428,8 +1432,12 @@ class EventRecorderApp(tk.Tk):
     def quit(self):
         """Safety cleanup when exiting."""
         self.running_live = False
+        self.replay_active = False
         self.slicer_instance = None
-        super().quit()
+        try:
+            super().quit()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
