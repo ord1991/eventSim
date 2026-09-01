@@ -129,6 +129,9 @@ class EventRecorderApp(tk.Tk):
         self.last_spatial_y = np.zeros(720, dtype=np.int32)
         self.last_isi_data = np.zeros(50, dtype=np.float32)
 
+        # Pre-allocated ISI bins array to avoid numpy re-allocation during 500ms chart redraws
+        self._isi_bins = np.linspace(0.1, 10.0, 50)
+
         self.start_app_time = time.time()
         self.event_rate_live = 0.0
         self.last_graph_update_time = 0.0  # Decoupled graph plotting rate limiter
@@ -145,6 +148,8 @@ class EventRecorderApp(tk.Tk):
         self.graph_accumulation_us_val = 10000.0  # Thread-safe float copy (µs)
         self.viz_mode = tk.StringVar(value="Accumulation") # "Accumulation" vs "Time-Surface Decay"
         self.color_palette = tk.StringVar(value="Monochrome") # "Monochrome", "Red/Blue", "Green/Red", "Heatmap"
+        self.viz_mode_val = "Accumulation" # Thread-safe primitive copy
+        self.color_palette_val = "Monochrome" # Thread-safe primitive copy
         self.roi_active = False
         self.roi_box = None # (x1, y1, x2, y2) in normalized image coordinates (0.0 to 1.0)
         self.drag_start = None
@@ -286,10 +291,12 @@ class EventRecorderApp(tk.Tk):
         ttk.Label(viz_ctrl_box, text="Mode:", style="PanelSec.TLabel", font=("Calibri", 9)).pack(side="left", padx=2)
         viz_combo = ttk.Combobox(viz_ctrl_box, textvariable=self.viz_mode, values=["Accumulation", "Time-Surface Decay"], state="readonly", width=14)
         viz_combo.pack(side="left", padx=3)
+        viz_combo.bind("<<ComboboxSelected>>", lambda e: setattr(self, 'viz_mode_val', self.viz_mode.get()))
 
         ttk.Label(viz_ctrl_box, text="Palette:", style="PanelSec.TLabel", font=("Calibri", 9)).pack(side="left", padx=2)
         pal_combo = ttk.Combobox(viz_ctrl_box, textvariable=self.color_palette, values=["Monochrome", "Red/Blue", "Green/Red", "Heatmap"], state="readonly", width=11)
         pal_combo.pack(side="left", padx=3)
+        pal_combo.bind("<<ComboboxSelected>>", lambda e: setattr(self, 'color_palette_val', self.color_palette.get()))
 
         clear_roi_btn = ttk.Button(viz_ctrl_box, text="Clear ROI", width=8, command=self.clear_roi, cursor="hand2")
         clear_roi_btn.pack(side="left", padx=3)
@@ -308,6 +315,7 @@ class EventRecorderApp(tk.Tk):
             justify="center"
         )
         self.image_label.pack(fill="both", expand=True, padx=15, pady=15)
+        self._image_label_has_text = True
 
         # Mouse Drag ROI Bounding Box Selection Bindings
         self.image_label.bind("<ButtonPress-1>", self.on_roi_start)
@@ -857,6 +865,7 @@ class EventRecorderApp(tk.Tk):
             image="",
             text="📷 Camera Disconnected\n\nClick 'Connect Camera 🔌' above\nto start live stream"
         )
+        self._image_label_has_text = True
 
         self.update_sdk_status()
         messagebox.showinfo("Disconnected", "Physical camera has been safely disconnected.")
@@ -1003,7 +1012,7 @@ class EventRecorderApp(tk.Tk):
                     graph_spatial_x += np.bincount(x_arr, minlength=width)
                     graph_events_cnt += evs.size
 
-                    palette = self.color_palette.get()
+                    palette = self.color_palette_val
                     if palette == "Red/Blue":
                         on_color, off_color = (255, 50, 50), (50, 50, 255)
                     elif palette == "Green/Red":
@@ -1245,7 +1254,7 @@ class EventRecorderApp(tk.Tk):
                         graph_spatial_x += np.bincount(x_arr, minlength=width)
                         graph_events_cnt += p_arr.size
 
-                        palette = self.color_palette.get()
+                        palette = self.color_palette_val
                         if palette == "Red/Blue":
                             on_color = (255, 50, 50)   # Red
                             off_color = (50, 50, 255)  # Blue
@@ -1259,7 +1268,7 @@ class EventRecorderApp(tk.Tk):
                             on_color = (255, 255, 255)
                             off_color = (100, 100, 100)
 
-                        if self.viz_mode.get() == "Time-Surface Decay":
+                        if self.viz_mode_val == "Time-Surface Decay":
                             cv2.multiply(display_frame, 0.85, dst=display_frame)
 
                         # Direct array indexing using cached structured array references
@@ -1300,7 +1309,7 @@ class EventRecorderApp(tk.Tk):
                     with self.lock:
                         self.shared_display_frame = display_frame.copy()
 
-                    if self.viz_mode.get() != "Time-Surface Decay":
+                    if self.viz_mode_val != "Time-Surface Decay":
                         display_frame.fill(0)
 
                     video_slice_counter = 0
@@ -1331,8 +1340,9 @@ class EventRecorderApp(tk.Tk):
 
             raw_ppm = self._ppm_header + self._resized_buf.tobytes()
 
-            if self.image_label.cget("text"):
+            if self._image_label_has_text:
                 self.image_label.config(text="")
+                self._image_label_has_text = False
             self.tk_image = tk.PhotoImage(data=raw_ppm)
             self.image_label.config(image=self.tk_image)
 
@@ -1370,7 +1380,7 @@ class EventRecorderApp(tk.Tk):
                             ax_t.set_ylim(max(0.0, min_r - 0.2 * (max_r - min_r)), max_r + 0.2 * (max_r - min_r))
 
                     if "ratio" in self.axes and hasattr(self, 'line_ratio'):
-                        self.line_ratio.set_data(list(self.time_history)[:len(self.on_ratio_history)], self.on_ratio_history)
+                        self.line_ratio.set_data(self.time_history, self.on_ratio_history)
                         ax_r = self.axes["ratio"]
                         ax_r.set_xlim(self.time_history[0], self.time_history[-1] + 0.1)
 
@@ -1383,9 +1393,8 @@ class EventRecorderApp(tk.Tk):
                         ax_s.set_ylim(0, max_sp * 1.1)
 
                     if "isi" in self.axes and hasattr(self, 'line_isi'):
-                        isi_bins = np.linspace(0.1, 10.0, 50)
-                        dummy_isi = np.exp(-isi_bins / 2.0) * (current_rate / 1000.0)
-                        self.line_isi.set_data(isi_bins, dummy_isi)
+                        dummy_isi = np.exp(-self._isi_bins / 2.0) * (current_rate / 1000.0)
+                        self.line_isi.set_data(self._isi_bins, dummy_isi)
                         ax_i = self.axes["isi"]
                         ax_i.set_xlim(0.1, 10.0)
                         ax_i.set_ylim(0, max(1.0, np.max(dummy_isi) * 1.1))
