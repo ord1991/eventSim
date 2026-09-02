@@ -975,7 +975,7 @@ class EventRecorderApp(tk.Tk):
             return
 
         try:
-            iterator = EventsIterator(input_path=file_path, delta_t=1000)
+            iterator = EventsIterator(input_path=file_path, delta_t=10000)
             height, width = iterator.get_size()
             display_frame = np.zeros((height, width, 3), dtype=np.uint8)
 
@@ -1163,8 +1163,8 @@ class EventRecorderApp(tk.Tk):
         self.disconnect_camera()
 
         try:
-            # Instantiate camera using EventsIterator on 1ms slice time base
-            self.slicer_instance = EventsIterator(input_path="", delta_t=1000)
+            # Instantiate camera using EventsIterator on 10ms slice time base (prevents USB buffer overflow)
+            self.slicer_instance = EventsIterator(input_path="", delta_t=10000)
             self.camera_instance = self.slicer_instance.reader.device
             if not self.camera_instance:
                 messagebox.showwarning(
@@ -1356,9 +1356,9 @@ class EventRecorderApp(tk.Tk):
             while len(self.on_ratio_history) > len(self.time_history):
                 self.on_ratio_history.popleft()
 
-            # Plot timeline updates at 60Hz rate (~16ms redraw interval)
+            # Plot timeline updates at decoupled 10Hz rate (100ms redraw interval) to keep UI responsive
             now = time.time()
-            if now - self.last_graph_update_time >= 0.016:
+            if now - self.last_graph_update_time >= 0.1:
                 self.last_graph_update_time = now
 
                 if self.time_history and hasattr(self, 'axes') and self.axes:
@@ -1415,8 +1415,8 @@ class EventRecorderApp(tk.Tk):
             self.stat_rate.config(text="0 Evt/s")
             self._prev_recording_active = False
 
-        # Re-trigger loop every 16ms (~60 FPS/Hz refresh rate)
-        self.after(16, self.update_loop)
+        # Re-trigger video update loop every 20ms (~50 FPS)
+        self.after(20, self.update_loop)
 
     def quit(self):
         """Safety cleanup when exiting."""
