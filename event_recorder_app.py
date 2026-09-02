@@ -129,6 +129,9 @@ class EventRecorderApp(tk.Tk):
         self.last_spatial_y = np.zeros(720, dtype=np.int32)
         self.last_isi_data = np.zeros(50, dtype=np.float32)
 
+        # Pre-allocated static array for ISI bins to ensure zero allocation churn during 60Hz redraws
+        self._isi_bins = np.linspace(0.1, 10.0, 50)
+
         self.start_app_time = time.time()
         self.event_rate_live = 0.0
         self.last_graph_update_time = 0.0  # Decoupled graph plotting rate limiter
@@ -1353,9 +1356,9 @@ class EventRecorderApp(tk.Tk):
             while len(self.on_ratio_history) > len(self.time_history):
                 self.on_ratio_history.popleft()
 
-            # Plot timeline updates at a decoupled rate (maximum once per 500ms)
+            # Plot timeline updates at 60Hz rate (~16ms redraw interval)
             now = time.time()
-            if now - self.last_graph_update_time >= 0.5:
+            if now - self.last_graph_update_time >= 0.016:
                 self.last_graph_update_time = now
 
                 if self.time_history and hasattr(self, 'axes') and self.axes:
@@ -1370,7 +1373,7 @@ class EventRecorderApp(tk.Tk):
                             ax_t.set_ylim(max(0.0, min_r - 0.2 * (max_r - min_r)), max_r + 0.2 * (max_r - min_r))
 
                     if "ratio" in self.axes and hasattr(self, 'line_ratio'):
-                        self.line_ratio.set_data(list(self.time_history)[:len(self.on_ratio_history)], self.on_ratio_history)
+                        self.line_ratio.set_data(self.time_history, self.on_ratio_history)
                         ax_r = self.axes["ratio"]
                         ax_r.set_xlim(self.time_history[0], self.time_history[-1] + 0.1)
 
@@ -1383,9 +1386,8 @@ class EventRecorderApp(tk.Tk):
                         ax_s.set_ylim(0, max_sp * 1.1)
 
                     if "isi" in self.axes and hasattr(self, 'line_isi'):
-                        isi_bins = np.linspace(0.1, 10.0, 50)
-                        dummy_isi = np.exp(-isi_bins / 2.0) * (current_rate / 1000.0)
-                        self.line_isi.set_data(isi_bins, dummy_isi)
+                        dummy_isi = np.exp(-self._isi_bins / 2.0) * (current_rate / 1000.0)
+                        self.line_isi.set_data(self._isi_bins, dummy_isi)
                         ax_i = self.axes["isi"]
                         ax_i.set_xlim(0.1, 10.0)
                         ax_i.set_ylim(0, max(1.0, np.max(dummy_isi) * 1.1))
@@ -1413,8 +1415,8 @@ class EventRecorderApp(tk.Tk):
             self.stat_rate.config(text="0 Evt/s")
             self._prev_recording_active = False
 
-        # Re-trigger loop every 20ms
-        self.after(20, self.update_loop)
+        # Re-trigger loop every 16ms (~60 FPS/Hz refresh rate)
+        self.after(16, self.update_loop)
 
     def quit(self):
         """Safety cleanup when exiting."""
