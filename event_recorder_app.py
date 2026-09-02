@@ -862,7 +862,6 @@ class EventRecorderApp(tk.Tk):
         self.camera_instance = None
 
         # Reset live image label with disconnected empty state guidance
-        self.tk_image = None
         self.image_label.config(
             image="",
             text="📷 Camera Disconnected\n\nClick 'Connect Camera 🔌' above\nto start live stream"
@@ -1342,9 +1341,13 @@ class EventRecorderApp(tk.Tk):
 
             raw_ppm = self._ppm_header + self._resized_buf.tobytes()
 
+            if self.tk_image is None:
+                self.tk_image = tk.PhotoImage(width=620, height=440)
+
             if self._image_label_has_text:
                 self.image_label.config(text="", image=self.tk_image)
                 self._image_label_has_text = False
+
             self.tk_image.put(data=raw_ppm)
 
             # Append current rate to historical arrays
