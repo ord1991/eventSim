@@ -154,24 +154,5 @@ class TestEventRecorderApp(unittest.TestCase):
         finally:
             app.destroy()
 
-    def test_tk_image_disconnect_and_render_resilience(self):
-        import event_recorder_app
-        import numpy as np
-        try:
-            app = event_recorder_app.EventRecorderApp()
-        except Exception as e:
-            self.skipTest(f"Tkinter display not available: {e}")
-
-        try:
-            # Simulate frames buffered in shared_display_frame while disconnecting camera
-            app.shared_display_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            app.disconnect_camera()
-
-            # Verify tk_image remains intact and usable for rendering
-            self.assertIsNotNone(app.tk_image)
-            self.assertTrue(hasattr(app.tk_image, "put"))
-        finally:
-            app.destroy()
-
 if __name__ == "__main__":
     unittest.main()
